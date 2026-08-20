@@ -35,6 +35,17 @@ def _resolve_child(obj):
     return None
 
 
+def _selected_rotate_children(context):
+    children = []
+    seen = set()
+    for item in utils.selected_objects(context):
+        child = _resolve_child(item)
+        if child and child.get("dsm_rotate_enabled", False) and child.name not in seen:
+            seen.add(child.name)
+            children.append(child)
+    return children
+
+
 def _remove_owned_rotation_drivers(obj):
     for index in range(3):
         utils.remove_owned_driver(obj, "rotation_euler", index, DRIVER_MARKER)
@@ -99,11 +110,9 @@ def _create_control(obj, context):
         if original_parent_type == 'BONE':
             control.parent_bone = original_parent_bone
 
-    # The Empty takes the object's world position + orientation.
+    # Empty owns position/orientation. The mesh rotates locally below it.
     control.matrix_world = Matrix.LocRotScale(location, rotation, Vector((1.0, 1.0, 1.0)))
 
-    # The mesh becomes a neutral local child. Its rotation channels are now a
-    # pure local spin layer, while the Empty remains free for G/R transforms.
     obj.parent = control
     obj.parent_type = 'OBJECT'
     obj.parent_bone = ""
@@ -132,6 +141,47 @@ def _add_spin_driver(obj, axis, expression):
     return fc is not None
 
 
+def _refresh_spin_driver(obj, scene):
+    """Update only the existing DSM spin driver's time range.
+
+    This is used by Key In / Key Out / Clear Range so changing the range does
+    not rebuild the Empty, alter parenting, or move the artist's rig.
+    """
+    child = _resolve_child(obj) or obj
+    if not child or not child.get("dsm_rotate_enabled", False):
+        return False
+
+    axis = child.get("dsm_rotate_axis", "Z")
+    index = _axis_index(axis)
+    fc = utils.get_driver_fcurve(child, "rotation_euler", index)
+    if not fc or not utils.driver_has_marker(fc, DRIVER_MARKER):
+        return False
+
+    speed = float(child.get("dsm_rotate_speed", scene.dsm_settings.rotate_speed))
+    delay = float(child.get("dsm_rotate_delay", 0.0))
+    angle_expression = _angle_expression(scene, speed, delay)
+    fc.driver.expression = f"({angle_expression}) + ({DRIVER_MARKER} * 0.0)"
+
+    try:
+        child.update_tag()
+    except Exception:
+        pass
+    return True
+
+
+def _refresh_selected_range(context):
+    count = 0
+    for child in _selected_rotate_children(context):
+        if _refresh_spin_driver(child, context.scene):
+            count += 1
+
+    try:
+        context.view_layer.update()
+    except Exception:
+        pass
+    return count
+
+
 def clear_object(obj, restore=True):
     child = _resolve_child(obj)
     if not child or not child.get("dsm_rotate_enabled", False):
@@ -139,6 +189,7 @@ def clear_object(obj, restore=True):
 
     control_name = child.get("dsm_rotate_control_name", "")
     control = bpy.data.objects.get(control_name) if control_name else None
+    seed = child.get("dsm_rotate_seed")
 
     _remove_owned_rotation_drivers(child)
     _remove_old_helpers(child)
@@ -190,6 +241,8 @@ def clear_object(obj, restore=True):
             pass
 
     utils.clear_feature_props(child, "rotate")
+    if seed is not None:
+        child["dsm_rotate_seed"] = int(seed)
     return True
 
 
@@ -197,12 +250,17 @@ def apply_object(obj, context):
     existing_child = _resolve_child(obj)
     if existing_child:
         obj = existing_child
+
+    # Keep deterministic variation stable when re-applying.
+    seed = obj.get("dsm_rotate_seed")
+    if obj.get("dsm_rotate_enabled", False):
         clear_object(obj, restore=True)
+        if seed is not None:
+            obj["dsm_rotate_seed"] = int(seed)
 
     scene = context.scene
     settings = scene.dsm_settings
 
-    # Do not overwrite the artist's existing rotation animation.
     if utils.has_animation_path(
         obj,
         {
@@ -252,14 +310,12 @@ def apply_object(obj, context):
     obj["dsm_rotate_control_name"] = control.name
     obj["dsm_rotate_axis"] = settings.rotate_axis
     obj["dsm_rotate_speed_factor"] = float(speed_factor)
+    obj["dsm_rotate_speed"] = float(speed)
     obj["dsm_rotate_delay"] = float(delay)
     obj["dsm_rotate_original_parent"] = original_parent_name
     obj["dsm_rotate_original_parent_type"] = original_parent_type
     obj["dsm_rotate_original_parent_bone"] = original_parent_bone
     obj["dsm_rotate_original_rotation_mode"] = original_rotation_mode
-
-    # Keep both the spinning mesh and the Empty selectable. The Empty is the
-    # transform control for moving/reorienting the entire spinning rig.
     obj.hide_select = False
 
     try:
@@ -342,6 +398,8 @@ class DSM_OT_rotate_key_in(Operator):
         settings = context.scene.dsm_settings
         settings.rotate_use_start = True
         settings.rotate_start = context.scene.frame_current
+        count = _refresh_selected_range(context)
+        self.report({'INFO'}, f"Key In set at frame {settings.rotate_start} on {count} Rotate rig(s)")
         return {'FINISHED'}
 
 
@@ -354,6 +412,8 @@ class DSM_OT_rotate_key_out(Operator):
         settings = context.scene.dsm_settings
         settings.rotate_use_end = True
         settings.rotate_end = context.scene.frame_current
+        count = _refresh_selected_range(context)
+        self.report({'INFO'}, f"Key Out set at frame {settings.rotate_end} on {count} Rotate rig(s)")
         return {'FINISHED'}
 
 
@@ -366,6 +426,8 @@ class DSM_OT_rotate_clear_range(Operator):
         settings = context.scene.dsm_settings
         settings.rotate_use_start = False
         settings.rotate_use_end = False
+        count = _refresh_selected_range(context)
+        self.report({'INFO'}, f"Rotate range cleared on {count} rig(s)")
         return {'FINISHED'}
 
 
