@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dead Simple Motion",
     "author": "VFXBlender",
-    "version": (0, 1, 2),
+    "version": (0, 1, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Dead Simple",
     "description": "Quick motion setup: Rotate, Orbit, Spawn/Looper, Follow, and FX",
