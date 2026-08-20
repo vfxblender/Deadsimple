@@ -44,9 +44,16 @@ class DSM_Settings(PropertyGroup):
     orbit_target: PointerProperty(name="Target", type=bpy.types.Object)
     orbit_bone: StringProperty(name="Bone", default="")
     orbit_plane: EnumProperty(name="Plane", items=[('XY', 'XY', ''), ('XZ', 'XZ', ''), ('YZ', 'YZ', '')], default='XY')
-    orbit_shape: EnumProperty(name="Shape", items=[('CIRCLE', 'Circle', ''), ('ELLIPSE', 'Ellipse', ''), ('INFINITY', 'Infinity', ''), ('SQUARE', 'Square', ''), ('SPHERE', 'Sphere', '')], default='CIRCLE')
+    orbit_shape: EnumProperty(name="Shape", items=[('CIRCLE', 'Circle', ''), ('ELLIPSE', 'Ellipse', ''), ('INFINITY', 'Infinity', ''), ('SQUARE', 'Square', ''), ('SPHERE', 'Sphere', '3D precessing orbital plane')], default='CIRCLE')
     orbit_behavior: EnumProperty(name="Behavior", items=[('NORMAL', 'Normal', 'Preserve current placement'), ('OFFSET', 'Offset', 'Evenly distribute selection'), ('RANDOM', 'Random', 'Randomize starting phase')], default='NORMAL')
     orbit_speed: FloatProperty(name="Speed", default=1.0, min=-20.0, max=20.0)
+    orbit_sphere_axis_speed: FloatProperty(
+        name="Axis Speed",
+        description="How fast the Sphere orbital plane itself rotates in 3D. 0 keeps one fixed plane",
+        default=0.35,
+        min=-5.0,
+        max=5.0,
+    )
     orbit_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
     orbit_fallback_radius: FloatProperty(name="Radius", default=2.0, min=0.001)
 
