@@ -39,7 +39,7 @@ def _remove_owned_rotation_drivers(obj):
     for index in range(3):
         utils.remove_owned_driver(obj, "rotation_euler", index, DRIVER_MARKER)
 
-    # Cleanup for early alpha builds only. These are not used by the new rig.
+    # Cleanup for early alpha builds only.
     for index in range(3):
         utils.remove_owned_driver(obj, "delta_rotation_euler", index, DRIVER_MARKER)
     for index in range(4):
@@ -157,7 +157,6 @@ def clear_object(obj, restore=True):
     original_parent_type = child.get("dsm_rotate_original_parent_type", "OBJECT")
     original_parent_bone = child.get("dsm_rotate_original_parent_bone", "")
     original_rotation_mode = child.get("dsm_rotate_original_rotation_mode", "XYZ")
-    original_hide_select = bool(child.get("dsm_rotate_original_hide_select", False))
 
     child.parent = original_parent
     if original_parent:
@@ -170,7 +169,7 @@ def clear_object(obj, restore=True):
 
     child.matrix_parent_inverse = Matrix.Identity(4)
     child.matrix_world = world
-    child.hide_select = original_hide_select
+    child.hide_select = False
 
     try:
         child.rotation_mode = original_rotation_mode
@@ -221,7 +220,6 @@ def apply_object(obj, context):
     original_parent_type = obj.parent_type if original_parent else "OBJECT"
     original_parent_bone = obj.parent_bone if original_parent and obj.parent_type == 'BONE' else ""
     original_rotation_mode = obj.rotation_mode
-    original_hide_select = bool(obj.hide_select)
 
     rng = utils.seeded_rng(obj, "rotate")
     speed_factor = utils.variation_factor(rng, settings.rotate_variation)
@@ -259,10 +257,10 @@ def apply_object(obj, context):
     obj["dsm_rotate_original_parent_type"] = original_parent_type
     obj["dsm_rotate_original_parent_bone"] = original_parent_bone
     obj["dsm_rotate_original_rotation_mode"] = original_rotation_mode
-    obj["dsm_rotate_original_hide_select"] = original_hide_select
 
-    # Clicking/manipulating should go to the Empty, not the spinning mesh.
-    obj.hide_select = True
+    # Keep both the spinning mesh and the Empty selectable. The Empty is the
+    # transform control for moving/reorienting the entire spinning rig.
+    obj.hide_select = False
 
     try:
         obj.update_tag()
