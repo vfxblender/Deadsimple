@@ -3,11 +3,9 @@ from bpy.types import Operator
 from . import utils
 
 MARKER = "dsm_rotate_marker"
-CONSTRAINT_NAME = "DSM Rotate Attach"
-
-
-def _axis_index(axis):
-    return {'X': 0, 'Y': 1, 'Z': 2}[axis]
+ATTACH_CONSTRAINT_NAME = "DSM Rotate Attach"
+SPIN_CONSTRAINT_NAME = "DSM Rotate Local Spin"
+HELPER_PREFIX = "DSM_ROT_"
 
 
 def _angle_expression(scene, speed, delay):
@@ -25,8 +23,8 @@ def _angle_expression(scene, speed, delay):
     return f"({elapsed}) * ({speed:.10f}) * 0.02"
 
 
-def _remove_attach_constraint(obj):
-    con = obj.constraints.get(CONSTRAINT_NAME)
+def _remove_constraint(obj, name):
+    con = obj.constraints.get(name)
     if con:
         try:
             obj.constraints.remove(con)
@@ -34,72 +32,162 @@ def _remove_attach_constraint(obj):
             pass
 
 
-def clear_object(obj, restore=True):
-    if not obj or not obj.get("dsm_rotate_enabled", False):
-        return False
+def _remove_helper(obj):
+    helper_name = obj.get("dsm_rotate_helper", "")
+    helper = bpy.data.objects.get(helper_name) if helper_name else None
+    if helper:
+        for index in range(4):
+            utils.remove_owned_driver(helper, "rotation_quaternion", index, MARKER)
+        try:
+            bpy.data.objects.remove(helper, do_unlink=True)
+        except Exception:
+            pass
+
+
+def _clear_legacy_delta_rotate(obj, restore=True):
+    """Remove the 0.1.0 delta-Euler implementation if present."""
     axis = int(obj.get("dsm_rotate_axis_index", 2))
     utils.remove_owned_driver(obj, "delta_rotation_euler", axis, MARKER)
-    if restore:
+    if restore and "dsm_rotate_base_delta" in obj:
         try:
             obj.delta_rotation_euler = obj.get("dsm_rotate_base_delta", [0.0, 0.0, 0.0])
         except Exception:
             pass
-    _remove_attach_constraint(obj)
+
+
+def clear_object(obj, restore=True):
+    if not obj or not obj.get("dsm_rotate_enabled", False):
+        return False
+
+    _remove_constraint(obj, SPIN_CONSTRAINT_NAME)
+    _remove_constraint(obj, ATTACH_CONSTRAINT_NAME)
+    _remove_helper(obj)
+    _clear_legacy_delta_rotate(obj, restore=restore)
+
     marker_prop = f"{MARKER}_value"
     if marker_prop in obj:
-        del obj[marker_prop]
+        try:
+            del obj[marker_prop]
+        except Exception:
+            pass
+
     utils.clear_feature_props(obj, "rotate")
     return True
 
 
 def _apply_attach_constraint(obj, target, bone_name):
-    _remove_attach_constraint(obj)
+    _remove_constraint(obj, ATTACH_CONSTRAINT_NAME)
     if not target:
         return
+
     target_matrix = utils.get_target_matrix(target, bone_name)
     if target_matrix is None:
         return
+
     con = obj.constraints.new('CHILD_OF')
-    con.name = CONSTRAINT_NAME
+    con.name = ATTACH_CONSTRAINT_NAME
     con.target = target
     if target.type == 'ARMATURE' and bone_name:
         con.subtarget = bone_name
+
+    # Keep the object exactly where it is when attachment is enabled.
     try:
         con.inverse_matrix = target_matrix.inverted()
     except Exception:
         pass
 
 
+def _create_spin_helper(obj, context, axis, angle_expr):
+    helper = bpy.data.objects.new(f"{HELPER_PREFIX}{obj.name}", None)
+    helper.empty_display_type = 'PLAIN_AXES'
+    helper.empty_display_size = 0.25
+    helper.rotation_mode = 'QUATERNION'
+    helper.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+    helper.hide_render = True
+    helper.hide_select = True
+    helper["dsm_rotate_helper_owner"] = obj.name
+
+    collection = obj.users_collection[0] if obj.users_collection else context.collection
+    collection.objects.link(helper)
+
+    # Keep the helper out of the artist's way while still allowing dependency
+    # graph evaluation for the Copy Rotation constraint.
+    try:
+        helper.hide_set(True)
+    except Exception:
+        pass
+
+    half_angle = f"(({angle_expr}) * 0.5)"
+    expressions = [f"cos({half_angle})", "0.0", "0.0", "0.0"]
+    axis_index = {'X': 1, 'Y': 2, 'Z': 3}[axis]
+    expressions[axis_index] = f"sin({half_angle})"
+
+    for index, expression in enumerate(expressions):
+        fc = utils.add_owned_driver(
+            helper,
+            "rotation_quaternion",
+            index,
+            expression,
+            MARKER,
+        )
+        if not fc:
+            try:
+                bpy.data.objects.remove(helper, do_unlink=True)
+            except Exception:
+                pass
+            return None
+
+    return helper
+
+
+def _apply_local_spin_constraint(obj, helper):
+    _remove_constraint(obj, SPIN_CONSTRAINT_NAME)
+    con = obj.constraints.new('COPY_ROTATION')
+    con.name = SPIN_CONSTRAINT_NAME
+    con.target = helper
+    con.use_x = True
+    con.use_y = True
+    con.use_z = True
+    con.invert_x = False
+    con.invert_y = False
+    con.invert_z = False
+    con.target_space = 'LOCAL'
+    con.owner_space = 'LOCAL'
+
+    # AFTER means the helper rotation is applied as though the helper were a
+    # child of the owner. This is the critical behavior that keeps the spin on
+    # the object's CURRENT local axis even when the artist reorients it.
+    con.mix_mode = 'AFTER'
+    return con
+
+
 def apply_object(obj, context):
     scene = context.scene
     settings = scene.dsm_settings
+
     clear_object(obj, restore=True)
-    axis = _axis_index(settings.rotate_axis)
-    existing = utils.get_driver_fcurve(obj, "delta_rotation_euler", axis)
-    if existing and not utils.driver_has_marker(existing, MARKER):
-        return False, "delta rotation channel already has a driver"
 
     rng = utils.seeded_rng(obj, "rotate")
     speed_factor = utils.variation_factor(rng, settings.rotate_variation)
     delay = rng.uniform(0.0, settings.rotate_variation * 12.0)
     speed = settings.rotate_speed * speed_factor
-    expr = _angle_expression(scene, speed, delay)
+    angle_expr = _angle_expression(scene, speed, delay)
 
-    obj["dsm_rotate_enabled"] = True
-    obj["dsm_rotate_axis_index"] = axis
-    obj["dsm_rotate_base_delta"] = utils.pack_vector(obj.delta_rotation_euler)
-    obj["dsm_rotate_speed_factor"] = float(speed_factor)
-    obj["dsm_rotate_delay"] = float(delay)
-
-    base = float(obj.delta_rotation_euler[axis])
-    fc = utils.add_owned_driver(obj, "delta_rotation_euler", axis, f"{base:.10f} + ({expr})", MARKER)
-    if not fc:
-        utils.clear_feature_props(obj, "rotate")
-        return False, "could not create rotate driver"
+    helper = _create_spin_helper(obj, context, settings.rotate_axis, angle_expr)
+    if helper is None:
+        return False, "could not create quaternion spin helper"
 
     target = settings.rotate_target
     bone = settings.rotate_bone.strip() if target and target.type == 'ARMATURE' else ""
+
     _apply_attach_constraint(obj, target, bone)
+    _apply_local_spin_constraint(obj, helper)
+
+    obj["dsm_rotate_enabled"] = True
+    obj["dsm_rotate_helper"] = helper.name
+    obj["dsm_rotate_axis"] = settings.rotate_axis
+    obj["dsm_rotate_speed_factor"] = float(speed_factor)
+    obj["dsm_rotate_delay"] = float(delay)
     obj["dsm_rotate_target"] = target.name if target else ""
     obj["dsm_rotate_bone"] = bone
     return True, ""
@@ -116,6 +204,7 @@ class DSM_OT_rotate_apply(Operator):
         if not objects:
             self.report({'WARNING'}, "Select one or more objects")
             return {'CANCELLED'}
+
         success = 0
         skipped = []
         for obj in objects:
@@ -124,6 +213,7 @@ class DSM_OT_rotate_apply(Operator):
                 success += 1
             else:
                 skipped.append(f"{obj.name}: {reason}")
+
         if skipped:
             self.report({'WARNING'}, "; ".join(skipped[:3]))
         self.report({'INFO'}, f"Rotate applied to {success} object(s)")
@@ -177,7 +267,13 @@ class DSM_OT_rotate_clear_range(Operator):
         return {'FINISHED'}
 
 
-_CLASSES = (DSM_OT_rotate_apply, DSM_OT_rotate_clear, DSM_OT_rotate_key_in, DSM_OT_rotate_key_out, DSM_OT_rotate_clear_range)
+_CLASSES = (
+    DSM_OT_rotate_apply,
+    DSM_OT_rotate_clear,
+    DSM_OT_rotate_key_in,
+    DSM_OT_rotate_key_out,
+    DSM_OT_rotate_clear_range,
+)
 
 
 def register():
