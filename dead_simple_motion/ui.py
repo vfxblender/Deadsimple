@@ -136,6 +136,8 @@ class DSM_PT_main(Panel):
             row.prop(settings, "spawn_axis", expand=True)
             box.prop(settings, "spawn_speed", text="Speed")
             box.prop(settings, "spawn_distance", text="Distance")
+            box.prop(settings, "spawn_fade_in_point", text="Fade In Point")
+            box.prop(settings, "spawn_fade_out_point", text="Fade Out Point")
             box.prop(settings, "spawn_variation", text="Variation")
             _apply_clear_row(box, "dsm.spawn_apply", "dsm.spawn_clear", "Apply Spawn / Looper")
 
