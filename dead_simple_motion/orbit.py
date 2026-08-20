@@ -39,6 +39,14 @@ def _resolve_orbit_object(obj):
     return None
 
 
+def _set_world_rotation(obj, quaternion):
+    try:
+        location, _rotation, scale = obj.matrix_world.decompose()
+        obj.matrix_world = Matrix.LocRotScale(location, quaternion, scale)
+    except Exception:
+        pass
+
+
 def _remove_camera_focus(camera):
     if not camera:
         return
@@ -60,12 +68,6 @@ def _remove_camera_focus(camera):
 
 
 def _create_camera_focus(camera, context, target, bone_name, pivot_world, radius):
-    """Create a user-movable focus Empty for an orbiting camera.
-
-    The focus starts exactly at the orbit pivot. When there is an object/bone
-    target, the Empty is parented to that target while preserving its world
-    transform, so it follows target motion but can still be offset by the user.
-    """
     _remove_camera_focus(camera)
 
     focus = bpy.data.objects.new(f"{FOCUS_PREFIX}{camera.name}", None)
@@ -89,8 +91,6 @@ def _create_camera_focus(camera, context, target, bone_name, pivot_world, radius
         else:
             focus.parent_type = 'OBJECT'
 
-    # Set after parenting so the default visible position is precisely the
-    # orbit origin/pivot rather than a parent-space offset.
     focus.matrix_world = Matrix.Translation(Vector(pivot_world))
 
     con = camera.constraints.new('DAMPED_TRACK')
@@ -117,6 +117,12 @@ def clear_object(obj, restore=True):
             child,
             utils.unpack_vector(child.get("dsm_orbit_start_world", (0.0, 0.0, 0.0))),
         )
+        start_rot = child.get("dsm_orbit_start_rotation")
+        if start_rot and len(start_rot) == 4:
+            try:
+                _set_world_rotation(child, Quaternion(tuple(float(v) for v in start_rot)))
+            except Exception:
+                pass
 
     utils.clear_feature_props(child, "orbit")
     if seed is not None:
@@ -125,7 +131,6 @@ def clear_object(obj, restore=True):
 
 
 def _sphere_basis(local, rng):
-    """Build a great-circle plane that passes through the object's start point."""
     radial = local.copy()
     if radial.length < 1e-5:
         radial = Vector((1.0, 0.0, 0.0))
@@ -141,7 +146,6 @@ def _sphere_basis(local, rng):
 
 
 def _sphere_precession_axis(e1, e2, rng):
-    """Choose a stable 3D axis that actually changes the orbital plane."""
     plane_normal = e1.cross(e2)
     if plane_normal.length < 1e-5:
         plane_normal = Vector((0.0, 0.0, 1.0))
@@ -163,6 +167,56 @@ def _sphere_precession_axis(e1, e2, rng):
     return axis
 
 
+def _local_position_at_frame(obj, frame):
+    speed = float(obj.get("dsm_orbit_speed", 1.0))
+    phase = float(obj.get("dsm_orbit_phase", 0.0))
+    t = float(frame) * speed * 0.02 + phase
+    radius = float(obj.get("dsm_orbit_radius", 2.0))
+    shape = obj.get("dsm_orbit_shape", "CIRCLE")
+
+    if shape == 'SPHERE':
+        e1 = utils.unpack_vector(obj.get("dsm_orbit_basis1", (1, 0, 0)))
+        e2 = utils.unpack_vector(obj.get("dsm_orbit_basis2", (0, 1, 0)))
+        circle_point = radius * (e1 * math.cos(t) + e2 * math.sin(t))
+
+        precession_axis = utils.unpack_vector(obj.get("dsm_orbit_precession_axis", (0, 0, 1)))
+        if precession_axis.length < 1e-5:
+            precession_axis = Vector((0.0, 0.0, 1.0))
+        else:
+            precession_axis.normalize()
+
+        axis_speed = float(obj.get("dsm_orbit_axis_speed", 0.35))
+        axis_start = float(obj.get("dsm_orbit_axis_start_frame", frame))
+        axis_angle = (float(frame) - axis_start) * axis_speed * 0.01
+        return Quaternion(precession_axis, axis_angle) @ circle_point
+
+    if shape == 'ELLIPSE':
+        u, v = radius * math.cos(t), radius * 0.6 * math.sin(t)
+    elif shape == 'INFINITY':
+        u, v = radius * math.sin(t), radius * 0.5 * math.sin(2.0 * t)
+    elif shape == 'SQUARE':
+        su, sv = utils.square_orbit(t)
+        u, v = radius * su, radius * sv
+    else:
+        u, v = radius * math.cos(t), radius * math.sin(t)
+
+    normal = float(obj.get("dsm_orbit_normal", 0.0))
+    return _plane_vector(u, v, normal, obj.get("dsm_orbit_plane", "XY"))
+
+
+def _face_along_direction(obj, direction):
+    if direction.length < 1e-7:
+        return
+
+    forward = obj.get("dsm_orbit_forward_axis", "Y")
+    up = 'Y' if forward in {'Z', '-Z'} else 'Z'
+    try:
+        rotation = direction.normalized().to_track_quat(forward, up)
+        _set_world_rotation(obj, rotation)
+    except Exception:
+        pass
+
+
 def apply_object(obj, context, index=0, count=1):
     existing = _resolve_orbit_object(obj)
     if existing:
@@ -179,6 +233,13 @@ def apply_object(obj, context, index=0, count=1):
     if utils.has_animation_path(obj, {"location"}):
         return False, "location already has animation or drivers", None
 
+    face_direction = bool(settings.orbit_face_direction and obj.type != 'CAMERA')
+    if face_direction and utils.has_animation_path(
+        obj,
+        {"rotation_euler", "rotation_quaternion", "rotation_axis_angle", "delta_rotation_euler", "delta_rotation_quaternion"},
+    ):
+        return False, "rotation already has animation or drivers; disable Face Direction", None
+
     target = settings.orbit_target
     bone = settings.orbit_bone.strip() if target and target.type == 'ARMATURE' else ""
     target_matrix = utils.get_target_matrix(target, bone)
@@ -187,6 +248,7 @@ def apply_object(obj, context, index=0, count=1):
 
     pivot_world = target_matrix.translation.copy()
     world = utils.get_world_location(obj)
+    start_rotation = obj.matrix_world.to_quaternion().copy()
     local = target_matrix.inverted() @ world
 
     rng = utils.seeded_rng(obj, "orbit")
@@ -196,12 +258,15 @@ def apply_object(obj, context, index=0, count=1):
 
     obj["dsm_orbit_enabled"] = True
     obj["dsm_orbit_start_world"] = utils.pack_vector(world)
+    obj["dsm_orbit_start_rotation"] = [float(v) for v in start_rotation]
     obj["dsm_orbit_target"] = target.name if target else ""
     obj["dsm_orbit_bone"] = bone
     obj["dsm_orbit_pivot"] = utils.pack_vector(scene.cursor.location)
     obj["dsm_orbit_plane"] = settings.orbit_plane
     obj["dsm_orbit_shape"] = shape
     obj["dsm_orbit_speed"] = float(speed)
+    obj["dsm_orbit_face_direction"] = face_direction
+    obj["dsm_orbit_forward_axis"] = settings.orbit_forward_axis
 
     if shape == 'SPHERE':
         e1, e2, radius = _sphere_basis(local, rng)
@@ -267,45 +332,17 @@ def update_object(obj, scene):
     if matrix is None:
         matrix = Matrix.Translation(utils.unpack_vector(obj.get("dsm_orbit_pivot", (0, 0, 0))))
 
-    speed = float(obj.get("dsm_orbit_speed", 1.0))
-    phase = float(obj.get("dsm_orbit_phase", 0.0))
-    t = scene.frame_current * speed * 0.02 + phase
-    radius = float(obj.get("dsm_orbit_radius", 2.0))
-    shape = obj.get("dsm_orbit_shape", "CIRCLE")
-
-    if shape == 'SPHERE':
-        e1 = utils.unpack_vector(obj.get("dsm_orbit_basis1", (1, 0, 0)))
-        e2 = utils.unpack_vector(obj.get("dsm_orbit_basis2", (0, 1, 0)))
-        circle_point = radius * (e1 * math.cos(t) + e2 * math.sin(t))
-
-        precession_axis = utils.unpack_vector(obj.get("dsm_orbit_precession_axis", (0, 0, 1)))
-        if precession_axis.length < 1e-5:
-            precession_axis = Vector((0.0, 0.0, 1.0))
-        else:
-            precession_axis.normalize()
-
-        axis_speed = float(obj.get("dsm_orbit_axis_speed", 0.35))
-        axis_start = float(obj.get("dsm_orbit_axis_start_frame", scene.frame_current))
-        axis_angle = (float(scene.frame_current) - axis_start) * axis_speed * 0.01
-        precession = Quaternion(precession_axis, axis_angle)
-        local = precession @ circle_point
-    else:
-        if shape == 'ELLIPSE':
-            u, v = radius * math.cos(t), radius * 0.6 * math.sin(t)
-        elif shape == 'INFINITY':
-            u, v = radius * math.sin(t), radius * 0.5 * math.sin(2.0 * t)
-        elif shape == 'SQUARE':
-            su, sv = utils.square_orbit(t)
-            u, v = radius * su, radius * sv
-        else:
-            u, v = radius * math.cos(t), radius * math.sin(t)
-
-        normal = float(obj.get("dsm_orbit_normal", 0.0))
-        local = _plane_vector(u, v, normal, obj.get("dsm_orbit_plane", "XY"))
-
+    frame = float(scene.frame_current)
+    local = _local_position_at_frame(obj, frame)
     world = matrix @ local
+
     if (utils.get_world_location(obj) - world).length > 1e-6:
         utils.set_world_location(obj, world)
+
+    if obj.get("dsm_orbit_face_direction", False) and obj.type != 'CAMERA':
+        next_local = _local_position_at_frame(obj, frame + 0.05)
+        next_world = matrix @ next_local
+        _face_along_direction(obj, next_world - world)
 
 
 def update_all(scene):
@@ -350,8 +387,6 @@ class DSM_OT_orbit_apply(Operator):
 
         update_all(context.scene)
 
-        # For a single orbiting camera, make the new focus Empty immediately
-        # available to the artist without making camera orbit setup cumbersome.
         if len(objects) == 1 and focus_empties:
             try:
                 bpy.ops.object.select_all(action='DESELECT')
