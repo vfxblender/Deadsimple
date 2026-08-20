@@ -74,6 +74,22 @@ class DSM_Settings(PropertyGroup):
     spawn_axis: EnumProperty(name="Axis", items=[('X', 'X', ''), ('Y', 'Y', ''), ('Z', 'Z', '')], default='X')
     spawn_speed: FloatProperty(name="Speed", default=0.1, min=-100.0, max=100.0)
     spawn_distance: FloatProperty(name="Distance", default=10.0, min=0.001)
+    spawn_fade_in_point: FloatProperty(
+        name="Fade In Point",
+        description="Point along the path where acceleration finishes. Lower values reach full speed sooner",
+        default=0.15,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+    spawn_fade_out_point: FloatProperty(
+        name="Fade Out Point",
+        description="Point along the path where deceleration begins. Useful for smooth Looper camera-slider turnarounds",
+        default=0.85,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
     spawn_variation: FloatProperty(name="Variation", default=0.12, min=0.0, max=0.5, subtype='PERCENTAGE')
 
     follow_target: PointerProperty(name="Target", type=bpy.types.Object)
