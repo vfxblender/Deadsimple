@@ -82,17 +82,29 @@ class DSM_PT_main(Panel):
         elif settings.tool == 'ORBIT':
             box = layout.box()
             _target_bone_ui(box, settings, "orbit_target", "orbit_bone")
-            row = box.row(align=True)
-            row.label(text="Plane")
-            row.prop(settings, "orbit_plane", expand=True)
             box.prop(settings, "orbit_shape", text="Shape")
+
+            if settings.orbit_shape == 'SPHERE':
+                row = box.row(align=True)
+                row.label(text="Plane")
+                row.label(text="3D / Rotating")
+                box.prop(settings, "orbit_sphere_axis_speed", text="Axis Speed")
+            else:
+                row = box.row(align=True)
+                row.label(text="Plane")
+                row.prop(settings, "orbit_plane", expand=True)
+
             row = box.row(align=True)
             row.label(text="Behavior")
             row.prop(settings, "orbit_behavior", expand=True)
             box.prop(settings, "orbit_speed", text="Speed")
             box.prop(settings, "orbit_variation", text="Variation")
-            if settings.orbit_target is None:
+
+            if settings.orbit_shape == 'SPHERE':
+                box.label(text="Sphere rotates its orbital plane in 3D", icon='ORIENTATION_GIMBAL')
+            elif settings.orbit_target is None:
                 box.label(text="No target: uses the 3D Cursor as pivot", icon='PIVOT_CURSOR')
+
             _apply_clear_row(box, "dsm.orbit_apply", "dsm.orbit_clear", "Apply Orbit")
 
         elif settings.tool == 'FX':
