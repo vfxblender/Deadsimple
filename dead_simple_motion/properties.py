@@ -24,9 +24,9 @@ class DSM_Settings(PropertyGroup):
         items=[
             ('ROTATE', "Rotate", "Spin selected objects"),
             ('ORBIT', "Orbit", "Orbit around an object, bone, or 3D cursor"),
-            ('FX', "FX", "Layered organic motion"),
             ('SPAWN', "Spawn", "Spawn traffic or loop motion"),
             ('FOLLOW', "Follow", "Smooth live location follow"),
+            ('FX', "FX", "Layered organic motion"),
         ],
         default='ROTATE',
     )
