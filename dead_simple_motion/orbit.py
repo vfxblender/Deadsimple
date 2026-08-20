@@ -1,6 +1,6 @@
 import math
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 from bpy.types import Operator
 from . import utils
 
@@ -36,20 +36,51 @@ def clear_object(obj, restore=True):
 
 
 def _sphere_basis(local, rng):
+    """Build a great-circle plane that passes through the object's start point."""
     radial = local.copy()
     if radial.length < 1e-5:
         radial = Vector((1.0, 0.0, 0.0))
+
     e1 = radial.normalized()
     trial = Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1)))
     if trial.length < 1e-5 or abs(trial.normalized().dot(e1)) > 0.95:
         trial = Vector((0.0, 0.0, 1.0)) if abs(e1.z) < 0.9 else Vector((0.0, 1.0, 0.0))
+
     e2 = (trial - e1 * trial.dot(e1)).normalized()
-    return e1, e2, max(local.length, 1e-5)
+    radius = max(local.length, 1e-5)
+    return e1, e2, radius
+
+
+def _sphere_precession_axis(e1, e2, rng):
+    """Choose a stable 3D axis that actually changes the orbital plane."""
+    plane_normal = e1.cross(e2)
+    if plane_normal.length < 1e-5:
+        plane_normal = Vector((0.0, 0.0, 1.0))
+    else:
+        plane_normal.normalize()
+
+    for _ in range(12):
+        axis = Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1)))
+        if axis.length < 1e-5:
+            continue
+        axis.normalize()
+        # If the axis is too close to the plane normal, the plane would mostly
+        # spin around itself and would not visibly precess in 3D.
+        if abs(axis.dot(plane_normal)) < 0.80:
+            return axis
+
+    # Deterministic fallback that is not parallel to the plane normal.
+    axis = e1 + plane_normal * 0.35
+    if axis.length < 1e-5:
+        axis = Vector((1.0, 0.0, 0.0))
+    axis.normalize()
+    return axis
 
 
 def apply_object(obj, context, index=0, count=1):
     scene = context.scene
     settings = scene.dsm_settings
+
     from . import spawn, follow
     spawn.clear_object(obj, restore=True)
     follow.clear_object(obj, restore=True)
@@ -66,6 +97,7 @@ def apply_object(obj, context, index=0, count=1):
 
     world = utils.get_world_location(obj)
     local = target_matrix.inverted() @ world
+
     rng = utils.seeded_rng(obj, "orbit")
     speed_factor = utils.variation_factor(rng, settings.orbit_variation)
     speed = settings.orbit_speed * speed_factor
@@ -81,14 +113,26 @@ def apply_object(obj, context, index=0, count=1):
     obj["dsm_orbit_speed"] = float(speed)
 
     if shape == 'SPHERE':
+        # Sphere is a true 3D precessing orbit. The object first travels in a
+        # great-circle plane, then that entire plane rotates around a second 3D
+        # axis over time. This creates the electron / atom style motion.
         e1, e2, radius = _sphere_basis(local, rng)
+        precession_axis = _sphere_precession_axis(e1, e2, rng)
+
         phase = -(scene.frame_current * speed * 0.02)
         if settings.orbit_behavior == 'OFFSET' and count > 1:
             phase += (2.0 * math.pi * index / count)
         elif settings.orbit_behavior == 'RANDOM':
             phase += rng.uniform(0.0, 2.0 * math.pi)
+
+        axis_factor = utils.variation_factor(rng, settings.orbit_variation * 0.5)
+        axis_speed = settings.orbit_sphere_axis_speed * axis_factor
+
         obj["dsm_orbit_basis1"] = utils.pack_vector(e1)
         obj["dsm_orbit_basis2"] = utils.pack_vector(e2)
+        obj["dsm_orbit_precession_axis"] = utils.pack_vector(precession_axis)
+        obj["dsm_orbit_axis_speed"] = float(axis_speed)
+        obj["dsm_orbit_axis_start_frame"] = float(scene.frame_current)
         obj["dsm_orbit_radius"] = float(max(radius, settings.orbit_fallback_radius if radius < 1e-4 else radius))
         obj["dsm_orbit_phase"] = float(phase)
     else:
@@ -99,20 +143,24 @@ def apply_object(obj, context, index=0, count=1):
             angle = 0.0
         else:
             angle = math.atan2(v, u)
+
         phase = angle - (scene.frame_current * speed * 0.02)
         if settings.orbit_behavior == 'OFFSET' and count > 1:
             phase += (2.0 * math.pi * index / count)
         elif settings.orbit_behavior == 'RANDOM':
             phase += rng.uniform(0.0, 2.0 * math.pi)
+
         obj["dsm_orbit_radius"] = float(radius)
         obj["dsm_orbit_normal"] = float(normal)
         obj["dsm_orbit_phase"] = float(phase)
+
     return True, ""
 
 
 def update_object(obj, scene):
     if not obj.get("dsm_orbit_enabled", False):
         return
+
     target = _target_for_object(obj)
     bone = obj.get("dsm_orbit_bone", "")
     matrix = utils.get_target_matrix(target, bone)
@@ -128,7 +176,23 @@ def update_object(obj, scene):
     if shape == 'SPHERE':
         e1 = utils.unpack_vector(obj.get("dsm_orbit_basis1", (1, 0, 0)))
         e2 = utils.unpack_vector(obj.get("dsm_orbit_basis2", (0, 1, 0)))
-        local = radius * (e1 * math.cos(t) + e2 * math.sin(t))
+
+        # First orbit in the object's local great-circle plane.
+        circle_point = radius * (e1 * math.cos(t) + e2 * math.sin(t))
+
+        # Then rotate that entire plane around a second 3D axis. This is the
+        # precession layer that turns a flat orbit into an atom/electron path.
+        precession_axis = utils.unpack_vector(obj.get("dsm_orbit_precession_axis", (0, 0, 1)))
+        if precession_axis.length < 1e-5:
+            precession_axis = Vector((0.0, 0.0, 1.0))
+        else:
+            precession_axis.normalize()
+
+        axis_speed = float(obj.get("dsm_orbit_axis_speed", 0.35))
+        axis_start = float(obj.get("dsm_orbit_axis_start_frame", scene.frame_current))
+        axis_angle = (float(scene.frame_current) - axis_start) * axis_speed * 0.01
+        precession = Quaternion(precession_axis, axis_angle)
+        local = precession @ circle_point
     else:
         if shape == 'ELLIPSE':
             u, v = radius * math.cos(t), radius * 0.6 * math.sin(t)
@@ -139,6 +203,7 @@ def update_object(obj, scene):
             u, v = radius * su, radius * sv
         else:
             u, v = radius * math.cos(t), radius * math.sin(t)
+
         normal = float(obj.get("dsm_orbit_normal", 0.0))
         local = _plane_vector(u, v, normal, obj.get("dsm_orbit_plane", "XY"))
 
@@ -164,16 +229,20 @@ class DSM_OT_orbit_apply(Operator):
         if not objects:
             self.report({'WARNING'}, "Select one or more orbiting objects")
             return {'CANCELLED'}
+
         success = 0
         skipped = []
         total = len(objects)
+
         for index, obj in enumerate(objects):
             ok, reason = apply_object(obj, context, index, total)
             if ok:
                 success += 1
             else:
                 skipped.append(f"{obj.name}: {reason}")
+
         update_all(context.scene)
+
         if skipped:
             self.report({'WARNING'}, "; ".join(skipped[:3]))
         self.report({'INFO'}, f"Orbit applied to {success} object(s)")
