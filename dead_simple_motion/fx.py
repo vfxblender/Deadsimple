@@ -13,6 +13,14 @@ PRESETS = {
     'BREATHING': dict(float=0.03, wobble=0.015, scale=0.055, bob=0.08, shake=0.0, shake_speed=4.0),
     'MAGIC_HOVER': dict(float=0.35, wobble=0.075, scale=0.02, bob=0.28, shake=0.01, shake_speed=6.0),
     'ALAKAZAM': dict(float=0.65, wobble=0.16, scale=0.07, bob=0.45, shake=0.05, shake_speed=13.0),
+    'HANDHELD_CAMERA': dict(float=0.025, wobble=0.018, scale=0.0, bob=0.018, shake=0.012, shake_speed=11.0),
+    'FLOATING_UI': dict(float=0.07, wobble=0.012, scale=0.012, bob=0.10, shake=0.002, shake_speed=4.0),
+    'ENGINE_IDLE': dict(float=0.008, wobble=0.006, scale=0.002, bob=0.004, shake=0.028, shake_speed=19.0),
+    'HEAVY_MACHINERY': dict(float=0.015, wobble=0.014, scale=0.004, bob=0.01, shake=0.075, shake_speed=13.0),
+    'UNDERWATER': dict(float=0.28, wobble=0.05, scale=0.008, bob=0.20, shake=0.002, shake_speed=3.0),
+    'DRUNK_CAMERA': dict(float=0.14, wobble=0.095, scale=0.0, bob=0.08, shake=0.01, shake_speed=5.0),
+    'MICRO_JITTER': dict(float=0.002, wobble=0.0025, scale=0.0, bob=0.0, shake=0.012, shake_speed=25.0),
+    'HOVERCRAFT': dict(float=0.11, wobble=0.028, scale=0.003, bob=0.13, shake=0.018, shake_speed=14.0),
 }
 
 
