@@ -71,6 +71,14 @@ class DSM_Settings(PropertyGroup):
 
     follow_target: PointerProperty(name="Target", type=bpy.types.Object)
     follow_bone: StringProperty(name="Bone", default="")
+    follow_delay: FloatProperty(
+        name="Delay",
+        description="How slowly the follower catches up to the target. 0 follows immediately; higher values trail farther behind",
+        default=35.0,
+        min=0.0,
+        max=100.0,
+    )
+    # Kept for compatibility with early alpha .blend files. The UI no longer uses it.
     follow_smoothness: FloatProperty(name="Smoothness", default=0.55, min=0.0, max=1.0)
     follow_drift: FloatProperty(name="Drift", default=0.12, min=0.0, max=10.0)
     follow_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
