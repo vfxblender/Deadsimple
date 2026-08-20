@@ -1,24 +1,17 @@
 import bpy
 from bpy.types import Operator
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 from . import utils
 
 MARKER = "dsm_rotate_marker"
 CONTROL_PREFIX = "DSM_ROT_CTRL_"
-LEGACY_HELPER_PREFIX = "DSM_ROT_"
 LEGACY_ATTACH_CONSTRAINT = "DSM Rotate Attach"
 LEGACY_SPIN_CONSTRAINT = "DSM Rotate Local Spin"
 
 
-def _axis_index(axis):
-    return {'X': 0, 'Y': 1, 'Z': 2}[axis]
-
-
 def _angle_expression(scene, speed, delay):
-    start = int(scene.frame_start)
     settings = scene.dsm_settings
-    if settings.rotate_use_start:
-        start = int(settings.rotate_start)
+    start = int(settings.rotate_start) if settings.rotate_use_start else int(scene.frame_start)
     start += int(round(delay))
 
     if settings.rotate_use_end:
@@ -69,8 +62,8 @@ def _remove_legacy_helper(child):
             pass
 
 
-def _clear_legacy_rotate(child):
-    """Clean the experimental 0.1.x rotate implementations."""
+def _cleanup_old_rotate_data(child):
+    """Remove rotate implementations from the early 0.1.x test builds."""
     _remove_constraint(child, LEGACY_ATTACH_CONSTRAINT)
     _remove_constraint(child, LEGACY_SPIN_CONSTRAINT)
     _remove_legacy_helper(child)
@@ -78,19 +71,29 @@ def _clear_legacy_rotate(child):
     for index in range(4):
         utils.remove_owned_driver(child, "rotation_quaternion", index, MARKER)
 
-    legacy_axis = int(child.get("dsm_rotate_axis_index", 2))
-    utils.remove_owned_driver(child, "delta_rotation_euler", legacy_axis, MARKER)
+    for index in range(3):
+        utils.remove_owned_driver(child, "delta_rotation_euler", index, MARKER)
+
+
+def _control_display_size(obj):
+    try:
+        size = max(float(v) for v in obj.dimensions)
+    except Exception:
+        size = 1.0
+    return max(1.0, min(size * 0.9, 8.0))
 
 
 def _create_control(child, context, original_parent, original_parent_type, original_parent_bone):
-    """Create the visible artist control and parent the spinning object beneath it."""
+    """Create the artist-facing axis Empty and put the object beneath it."""
     world = child.matrix_world.copy()
+    location, rotation, scale = world.decompose()
 
     control = bpy.data.objects.new(f"{CONTROL_PREFIX}{child.name}", None)
     control.empty_display_type = 'ARROWS'
-    control.empty_display_size = 0.85
+    control.empty_display_size = _control_display_size(child)
     control.show_in_front = True
     control.hide_render = True
+    control.hide_select = False
     control["dsm_rotate_control"] = True
     control["dsm_rotate_child"] = child.name
 
@@ -109,15 +112,29 @@ def _create_control(child, context, original_parent, original_parent_type, origi
             except Exception:
                 pass
 
-    control.matrix_world = world
+    # The control owns placement + orientation. Scale stays on the child.
+    control.matrix_world = Matrix.LocRotScale(location, rotation, Vector((1.0, 1.0, 1.0)))
 
+    # The child is deliberately neutral underneath the control. This makes
+    # quaternion X/Y/Z spin unambiguously LOCAL to the visible axis Empty.
     child.parent = control
     child.parent_type = 'OBJECT'
     child.parent_bone = ""
     child.matrix_parent_inverse = Matrix.Identity(4)
-    child.matrix_world = world
+    child.location = (0.0, 0.0, 0.0)
+    child.rotation_mode = 'QUATERNION'
+    child.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+    child.scale = scale
 
     return control
+
+
+def _spin_expressions(axis, angle_expr):
+    half = f"(({angle_expr}) * 0.5)"
+    expressions = [f"cos({half})", "0.0", "0.0", "0.0"]
+    axis_index = {'X': 1, 'Y': 2, 'Z': 3}[axis]
+    expressions[axis_index] = f"sin({half})"
+    return expressions
 
 
 def clear_object(obj, restore=True):
@@ -125,19 +142,18 @@ def clear_object(obj, restore=True):
     if not child or not child.get("dsm_rotate_enabled", False):
         return False
 
-    _clear_legacy_rotate(child)
+    control_name = child.get("dsm_rotate_control_name", "")
+    control = bpy.data.objects.get(control_name) if control_name else None
 
-    axis = int(child.get("dsm_rotate_axis_index", 2))
-    utils.remove_owned_driver(child, "delta_rotation_euler", axis, MARKER)
+    _cleanup_old_rotate_data(child)
 
-    base_delta = child.get("dsm_rotate_base_delta")
-    if restore and base_delta:
-        try:
-            child.delta_rotation_euler = tuple(float(v) for v in base_delta)
-        except Exception:
-            pass
+    for index in range(4):
+        utils.remove_owned_driver(child, "rotation_quaternion", index, MARKER)
 
+    # Remove the spin before capturing the control's current placement.
     try:
+        child.rotation_mode = 'QUATERNION'
+        child.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
         bpy.context.view_layer.update()
     except Exception:
         pass
@@ -149,9 +165,7 @@ def clear_object(obj, restore=True):
     original_parent_type = child.get("dsm_rotate_original_parent_type", "OBJECT")
     original_parent_bone = child.get("dsm_rotate_original_parent_bone", "")
     original_rotation_mode = child.get("dsm_rotate_original_rotation_mode", "XYZ")
-
-    control_name = child.get("dsm_rotate_control_name", "")
-    control = bpy.data.objects.get(control_name) if control_name else None
+    original_hide_select = bool(child.get("dsm_rotate_original_hide_select", False))
 
     child.parent = original_parent
     if original_parent:
@@ -170,6 +184,7 @@ def clear_object(obj, restore=True):
 
     child.matrix_parent_inverse = Matrix.Identity(4)
     child.matrix_world = world
+    child.hide_select = original_hide_select
 
     try:
         child.rotation_mode = original_rotation_mode
@@ -202,6 +217,7 @@ def apply_object(obj, context):
     scene = context.scene
     settings = scene.dsm_settings
 
+    # Never overwrite the artist's own rotation animation/drivers.
     if utils.has_animation_path(
         obj,
         {
@@ -219,12 +235,7 @@ def apply_object(obj, context):
     original_parent_type = obj.parent_type if original_parent else "OBJECT"
     original_parent_bone = obj.parent_bone if original_parent and obj.parent_type == 'BONE' else ""
     original_rotation_mode = obj.rotation_mode
-
-    if obj.rotation_mode in {'QUATERNION', 'AXIS_ANGLE'}:
-        obj.rotation_mode = 'XYZ'
-
-    base_delta = [float(v) for v in obj.delta_rotation_euler]
-    axis = _axis_index(settings.rotate_axis)
+    original_hide_select = bool(obj.hide_select)
 
     rng = utils.seeded_rng(obj, "rotate")
     speed_factor = utils.variation_factor(rng, settings.rotate_variation)
@@ -240,39 +251,32 @@ def apply_object(obj, context):
         original_parent_bone,
     )
 
-    expression = f"({base_delta[axis]:.12f}) + ({angle_expr})"
-    fc = utils.add_owned_driver(
-        obj,
-        "delta_rotation_euler",
-        axis,
-        expression,
-        MARKER,
-    )
-    if not fc:
-        world = obj.matrix_world.copy()
-        obj.parent = original_parent
-        obj.matrix_parent_inverse = Matrix.Identity(4)
-        obj.matrix_world = world
-        try:
-            obj.rotation_mode = original_rotation_mode
-        except Exception:
-            pass
-        try:
-            bpy.data.objects.remove(control, do_unlink=True)
-        except Exception:
-            pass
-        return False, "could not create rotate driver", None
+    created = []
+    for index, expression in enumerate(_spin_expressions(settings.rotate_axis, angle_expr)):
+        fc = utils.add_owned_driver(obj, "rotation_quaternion", index, expression, MARKER)
+        if not fc:
+            for made_index in created:
+                utils.remove_owned_driver(obj, "rotation_quaternion", made_index, MARKER)
+            try:
+                bpy.data.objects.remove(control, do_unlink=True)
+            except Exception:
+                pass
+            return False, "could not create quaternion rotate driver", None
+        created.append(index)
 
     obj["dsm_rotate_enabled"] = True
     obj["dsm_rotate_control_name"] = control.name
-    obj["dsm_rotate_axis_index"] = axis
-    obj["dsm_rotate_base_delta"] = base_delta
+    obj["dsm_rotate_axis"] = settings.rotate_axis
     obj["dsm_rotate_speed_factor"] = float(speed_factor)
     obj["dsm_rotate_delay"] = float(delay)
     obj["dsm_rotate_original_parent"] = original_parent_name
     obj["dsm_rotate_original_parent_type"] = original_parent_type
     obj["dsm_rotate_original_parent_bone"] = original_parent_bone
     obj["dsm_rotate_original_rotation_mode"] = original_rotation_mode
+    obj["dsm_rotate_original_hide_select"] = original_hide_select
+
+    # Once rigged, the user manipulates the axis Empty, not the spinning mesh.
+    obj.hide_select = True
 
     try:
         obj.update_tag()
@@ -305,6 +309,7 @@ class DSM_OT_rotate_apply(Operator):
         success = 0
         skipped = []
         controls = []
+
         for obj in unique_objects:
             ok, reason, control = apply_object(obj, context)
             if ok:
@@ -317,6 +322,7 @@ class DSM_OT_rotate_apply(Operator):
             try:
                 bpy.ops.object.select_all(action='DESELECT')
                 for control in controls:
+                    control.hide_select = False
                     control.select_set(True)
                 context.view_layer.objects.active = controls[0]
             except Exception:
