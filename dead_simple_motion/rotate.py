@@ -11,10 +11,24 @@ def _axis_index(axis):
     return {"X": 0, "Y": 1, "Z": 2}[axis]
 
 
+def _effective_range(scene, obj=None):
+    settings = scene.dsm_settings
+    start = int(settings.rotate_start) if settings.rotate_use_start else int(scene.frame_start)
+    end = int(settings.rotate_end) if settings.rotate_use_end else int(scene.frame_end)
+
+    if obj is not None and not settings.rotate_use_start:
+        start += int(round(float(obj.get("dsm_rotate_delay", 0.0))))
+
+    if end <= start:
+        end = start + 1
+    return start, end
+
+
 def _angle_expression(scene, speed, delay_frames):
     settings = scene.dsm_settings
     start = int(settings.rotate_start) if settings.rotate_use_start else int(scene.frame_start)
-    start += int(round(delay_frames))
+    if not settings.rotate_use_start:
+        start += int(round(delay_frames))
 
     if settings.rotate_use_end:
         end = max(start, int(settings.rotate_end))
@@ -84,7 +98,6 @@ def _control_size(obj):
 
 
 def _create_control(obj, context):
-    """Create a visible Empty that owns placement/orientation for the spinner."""
     world = obj.matrix_world.copy()
     location, rotation, scale = world.decompose()
 
@@ -110,7 +123,6 @@ def _create_control(obj, context):
         if original_parent_type == 'BONE':
             control.parent_bone = original_parent_bone
 
-    # Empty owns position/orientation. The mesh rotates locally below it.
     control.matrix_world = Matrix.LocRotScale(location, rotation, Vector((1.0, 1.0, 1.0)))
 
     obj.parent = control
@@ -141,15 +153,153 @@ def _add_spin_driver(obj, axis, expression):
     return fc is not None
 
 
-def _refresh_spin_driver(obj, scene):
-    """Update only the existing DSM spin driver's time range.
+def _get_action_fcurve(obj, data_path, index):
+    ad = getattr(obj, "animation_data", None)
+    action = getattr(ad, "action", None) if ad else None
+    if not action:
+        return None, None
 
-    This is used by Key In / Key Out / Clear Range so changing the range does
-    not rebuild the Empty, alter parenting, or move the artist's rig.
-    """
+    # Blender 4.4+ / 5.x layered Actions.
+    try:
+        from bpy_extras.anim_utils import animdata_get_channelbag_for_assigned_slot
+        bag = animdata_get_channelbag_for_assigned_slot(ad)
+        if bag:
+            fc = bag.fcurves.find(data_path, index=index)
+            if fc:
+                return fc, bag.fcurves
+    except Exception:
+        pass
+
+    # Blender 4.2 legacy Actions.
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is not None:
+        try:
+            fc = fcurves.find(data_path, index=index)
+            if fc:
+                return fc, fcurves
+        except Exception:
+            try:
+                for fc in fcurves:
+                    if fc.data_path == data_path and fc.array_index == index:
+                        return fc, fcurves
+            except Exception:
+                pass
+
+    ensure = getattr(action, "fcurve_ensure_for_datablock", None)
+    if ensure:
+        try:
+            return ensure(obj, data_path, index=index), None
+        except Exception:
+            pass
+    return None, None
+
+
+def _remove_baked_rotation_keys(obj):
+    if not obj or not obj.get("dsm_rotate_baked", False):
+        return
+
+    axis = _axis_index(obj.get("dsm_rotate_axis", "Z"))
+    frames = list(obj.get("dsm_rotate_bake_frames", []))
+
+    for frame in frames:
+        try:
+            obj.keyframe_delete(data_path="rotation_euler", index=axis, frame=float(frame))
+        except Exception:
+            pass
+
+    fc, collection = _get_action_fcurve(obj, "rotation_euler", axis)
+    if fc and len(fc.keyframe_points) == 0 and len(fc.modifiers) == 0 and collection is not None:
+        try:
+            collection.remove(fc)
+        except Exception:
+            pass
+
+    obj["dsm_rotate_baked"] = False
+    if "dsm_rotate_bake_frames" in obj:
+        try:
+            del obj["dsm_rotate_bake_frames"]
+        except Exception:
+            pass
+
+
+def _set_linear_bake_curve(obj, axis_index):
+    fc, _collection = _get_action_fcurve(obj, "rotation_euler", axis_index)
+    if not fc:
+        return
+
+    try:
+        fc.extrapolation = 'CONSTANT'
+    except Exception:
+        pass
+
+    for key in fc.keyframe_points:
+        try:
+            key.interpolation = 'LINEAR'
+        except Exception:
+            pass
+
+
+def _bake_object_rotation(obj, scene):
     child = _resolve_child(obj) or obj
     if not child or not child.get("dsm_rotate_enabled", False):
         return False
+
+    axis_name = child.get("dsm_rotate_axis", "Z")
+    axis = _axis_index(axis_name)
+    speed = float(child.get("dsm_rotate_speed", scene.dsm_settings.rotate_speed))
+    start, end = _effective_range(scene, child)
+    angle = (end - start) * speed * 0.02
+
+    _remove_baked_rotation_keys(child)
+    utils.remove_owned_driver(child, "rotation_euler", axis, DRIVER_MARKER)
+
+    marker_prop = f"{DRIVER_MARKER}_value"
+    if marker_prop in child:
+        try:
+            del child[marker_prop]
+        except Exception:
+            pass
+
+    current_frame = int(scene.frame_current)
+
+    try:
+        child.rotation_mode = 'XYZ'
+        child.rotation_euler[axis] = 0.0
+        child.keyframe_insert(
+            data_path="rotation_euler",
+            index=axis,
+            frame=float(start),
+            group="Dead Simple Rotate",
+        )
+
+        child.rotation_euler[axis] = angle
+        child.keyframe_insert(
+            data_path="rotation_euler",
+            index=axis,
+            frame=float(end),
+            group="Dead Simple Rotate",
+        )
+    except Exception:
+        return False
+
+    _set_linear_bake_curve(child, axis)
+    child["dsm_rotate_baked"] = True
+    child["dsm_rotate_bake_frames"] = [float(start), float(end)]
+
+    try:
+        scene.frame_set(current_frame)
+    except Exception:
+        pass
+    return True
+
+
+def _refresh_spin_driver(obj, scene):
+    child = _resolve_child(obj) or obj
+    if not child or not child.get("dsm_rotate_enabled", False):
+        return False
+
+    if child.get("dsm_rotate_baked", False):
+        return _bake_object_rotation(child, scene)
 
     axis = child.get("dsm_rotate_axis", "Z")
     index = _axis_index(axis)
@@ -191,6 +341,7 @@ def clear_object(obj, restore=True):
     control = bpy.data.objects.get(control_name) if control_name else None
     seed = child.get("dsm_rotate_seed")
 
+    _remove_baked_rotation_keys(child)
     _remove_owned_rotation_drivers(child)
     _remove_old_helpers(child)
 
@@ -251,7 +402,6 @@ def apply_object(obj, context):
     if existing_child:
         obj = existing_child
 
-    # Keep deterministic variation stable when re-applying.
     seed = obj.get("dsm_rotate_seed")
     if obj.get("dsm_rotate_enabled", False):
         clear_object(obj, restore=True)
@@ -281,7 +431,8 @@ def apply_object(obj, context):
 
     rng = utils.seeded_rng(obj, "rotate")
     speed_factor = utils.variation_factor(rng, settings.rotate_variation)
-    delay = rng.uniform(0.0, settings.rotate_variation * 12.0)
+    # When Key In is enabled, it is an exact start frame. Variation only changes speed.
+    delay = 0.0 if settings.rotate_use_start else rng.uniform(0.0, settings.rotate_variation * 12.0)
     speed = settings.rotate_speed * speed_factor
     angle_expression = _angle_expression(scene, speed, delay)
 
@@ -316,6 +467,7 @@ def apply_object(obj, context):
     obj["dsm_rotate_original_parent_type"] = original_parent_type
     obj["dsm_rotate_original_parent_bone"] = original_parent_bone
     obj["dsm_rotate_original_rotation_mode"] = original_rotation_mode
+    obj["dsm_rotate_baked"] = False
     obj.hide_select = False
 
     try:
@@ -365,6 +517,23 @@ class DSM_OT_rotate_apply(Operator):
         if skipped:
             self.report({'WARNING'}, "; ".join(skipped[:3]))
         self.report({'INFO'}, f"Rotate applied to {len(controls)} object(s)")
+        return {'FINISHED'}
+
+
+class DSM_OT_rotate_bake(Operator):
+    bl_idname = "dsm.rotate_bake"
+    bl_label = "Bake Rotation"
+    bl_description = "Convert the DSM spin to two linear keyframes at Key In and Key Out"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        children = _selected_rotate_children(context)
+        if not children:
+            self.report({'WARNING'}, "Select a rotated object or its DSM Rotate control")
+            return {'CANCELLED'}
+
+        baked = sum(1 for child in children if _bake_object_rotation(child, context.scene))
+        self.report({'INFO'}, f"Rotation baked on {baked} object(s)")
         return {'FINISHED'}
 
 
@@ -433,6 +602,7 @@ class DSM_OT_rotate_clear_range(Operator):
 
 _CLASSES = (
     DSM_OT_rotate_apply,
+    DSM_OT_rotate_bake,
     DSM_OT_rotate_clear,
     DSM_OT_rotate_key_in,
     DSM_OT_rotate_key_out,
