@@ -36,8 +36,8 @@ class DSM_Settings(PropertyGroup):
     rotate_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
     rotate_target: PointerProperty(name="Target", type=bpy.types.Object)
     rotate_bone: StringProperty(name="Bone", default="")
-    rotate_use_start: BoolProperty(name="Use Key In", default=False)
-    rotate_use_end: BoolProperty(name="Use Key Out", default=False)
+    rotate_use_start: BoolProperty(name="Use Key In", default=True)
+    rotate_use_end: BoolProperty(name="Use Key Out", default=True)
     rotate_start: IntProperty(name="Key In", default=1)
     rotate_end: IntProperty(name="Key Out", default=250)
 
@@ -54,10 +54,48 @@ class DSM_Settings(PropertyGroup):
         min=-5.0,
         max=5.0,
     )
+    orbit_face_direction: BoolProperty(
+        name="Face Direction",
+        description="Rotate the orbiting object so its forward axis points along the direction of travel",
+        default=True,
+    )
+    orbit_forward_axis: EnumProperty(
+        name="Forward",
+        description="Local axis that should point along the orbit path",
+        items=[
+            ('Y', '+Y', ''),
+            ('-Y', '-Y', ''),
+            ('X', '+X', ''),
+            ('-X', '-X', ''),
+            ('Z', '+Z', ''),
+            ('-Z', '-Z', ''),
+        ],
+        default='Y',
+    )
     orbit_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
     orbit_fallback_radius: FloatProperty(name="Radius", default=2.0, min=0.001)
 
-    fx_preset: EnumProperty(name="Preset", items=[('SCIFI_DRONE', 'Sci-Fi Drone', ''), ('SPACE_DEBRIS', 'Space Debris', ''), ('ENGINE', 'Engine Vibration', ''), ('BREATHING', 'Breathing', ''), ('MAGIC_HOVER', 'Magic Hover', ''), ('ALAKAZAM', 'Alakazam!', '')], default='SCIFI_DRONE', update=_preset_update)
+    fx_preset: EnumProperty(
+        name="Preset",
+        items=[
+            ('SCIFI_DRONE', 'Sci-Fi Drone', ''),
+            ('SPACE_DEBRIS', 'Space Debris', ''),
+            ('ENGINE', 'Engine Vibration', ''),
+            ('BREATHING', 'Breathing', ''),
+            ('MAGIC_HOVER', 'Magic Hover', ''),
+            ('ALAKAZAM', 'Alakazam!', ''),
+            ('HANDHELD_CAMERA', 'Handheld Camera', ''),
+            ('FLOATING_UI', 'Floating UI', ''),
+            ('ENGINE_IDLE', 'Engine Idle', ''),
+            ('HEAVY_MACHINERY', 'Heavy Machinery', ''),
+            ('UNDERWATER', 'Underwater', ''),
+            ('DRUNK_CAMERA', 'Drunk Camera', ''),
+            ('MICRO_JITTER', 'Micro Jitter', ''),
+            ('HOVERCRAFT', 'Hovercraft', ''),
+        ],
+        default='SCIFI_DRONE',
+        update=_preset_update,
+    )
     fx_amount: FloatProperty(name="Amount", default=1.0, min=0.0, max=10.0)
     fx_speed: FloatProperty(name="Speed", default=1.0, min=0.0, max=20.0)
     fx_variation: FloatProperty(name="Variation", default=0.12, min=0.0, max=0.5, subtype='PERCENTAGE')
