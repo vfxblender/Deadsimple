@@ -71,13 +71,16 @@ class DSM_PT_main(Panel):
             range_row.operator("dsm.rotate_clear_range", text="Clear", icon='X')
 
             if settings.rotate_use_start or settings.rotate_use_end:
-                start = str(settings.rotate_start) if settings.rotate_use_start else "Start"
-                end = str(settings.rotate_end) if settings.rotate_use_end else "Forever"
+                start = str(settings.rotate_start) if settings.rotate_use_start else "Scene Start"
+                end = str(settings.rotate_end) if settings.rotate_use_end else "Scene End"
                 box.label(text=f"Range: {start} → {end}")
             else:
                 box.label(text="Range: Forever")
 
             _apply_clear_row(box, "dsm.rotate_apply", "dsm.rotate_clear", "Apply Rotate")
+            bake = box.row()
+            bake.scale_y = 1.1
+            bake.operator("dsm.rotate_bake", text="Bake Rotation", icon='KEYFRAME_HLT')
 
         elif settings.tool == 'ORBIT':
             box = layout.box()
@@ -99,6 +102,9 @@ class DSM_PT_main(Panel):
             row.prop(settings, "orbit_behavior", expand=True)
             box.prop(settings, "orbit_speed", text="Speed")
             box.prop(settings, "orbit_variation", text="Variation")
+            box.prop(settings, "orbit_face_direction", text="Face Direction")
+            if settings.orbit_face_direction:
+                box.prop(settings, "orbit_forward_axis", text="Forward Axis")
 
             if settings.orbit_shape == 'SPHERE':
                 box.label(text="Sphere rotates its orbital plane in 3D", icon='ORIENTATION_GIMBAL')
