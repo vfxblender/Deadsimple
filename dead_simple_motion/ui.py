@@ -64,17 +64,19 @@ class DSM_PT_main(Panel):
             row.prop(settings, "rotate_axis", expand=True)
             box.prop(settings, "rotate_speed", text="Speed")
             box.prop(settings, "rotate_variation", text="Variation")
-            _target_bone_ui(box, settings, "rotate_target", "rotate_bone")
+
             range_row = box.row(align=True)
             range_row.operator("dsm.rotate_key_in", text="Key In", icon='KEY_HLT')
             range_row.operator("dsm.rotate_key_out", text="Key Out", icon='KEY_DEHLT')
             range_row.operator("dsm.rotate_clear_range", text="Clear", icon='X')
+
             if settings.rotate_use_start or settings.rotate_use_end:
                 start = str(settings.rotate_start) if settings.rotate_use_start else "Start"
                 end = str(settings.rotate_end) if settings.rotate_use_end else "Forever"
                 box.label(text=f"Range: {start} → {end}")
             else:
                 box.label(text="Range: Forever")
+
             _apply_clear_row(box, "dsm.rotate_apply", "dsm.rotate_clear", "Apply Rotate")
 
         elif settings.tool == 'ORBIT':
