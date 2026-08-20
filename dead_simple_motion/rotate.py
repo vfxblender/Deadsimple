@@ -1,11 +1,13 @@
 import bpy
 from bpy.types import Operator
+from mathutils import Matrix, Vector
 from . import utils
 
 MARKER = "dsm_rotate_marker"
-ATTACH_CONSTRAINT_NAME = "DSM Rotate Attach"
-SPIN_CONSTRAINT_NAME = "DSM Rotate Local Spin"
-HELPER_PREFIX = "DSM_ROT_"
+CONTROL_PREFIX = "DSM_ROT_CTRL_"
+LEGACY_HELPER_PREFIX = "DSM_ROT_"
+LEGACY_ATTACH_CONSTRAINT = "DSM Rotate Attach"
+LEGACY_SPIN_CONSTRAINT = "DSM Rotate Local Spin"
 
 
 def _angle_expression(scene, speed, delay):
@@ -13,6 +15,7 @@ def _angle_expression(scene, speed, delay):
     if scene.dsm_settings.rotate_use_start:
         start = int(scene.dsm_settings.rotate_start)
     start += int(delay)
+
     end = int(scene.dsm_settings.rotate_end) if scene.dsm_settings.rotate_use_end else None
     if end is not None:
         if end < start:
@@ -20,10 +23,30 @@ def _angle_expression(scene, speed, delay):
         elapsed = f"max(min(frame, {end}) - {start}, 0)"
     else:
         elapsed = f"max(frame - {start}, 0)"
+
     return f"({elapsed}) * ({speed:.10f}) * 0.02"
 
 
+def _resolve_rotate_child(obj):
+    if not obj:
+        return None
+
+    if obj.get("dsm_rotate_control", False):
+        return bpy.data.objects.get(obj.get("dsm_rotate_child", ""))
+
+    # 0.1.1 / 0.1.2 quaternion helper migration.
+    if obj.get("dsm_rotate_helper_owner"):
+        return bpy.data.objects.get(obj.get("dsm_rotate_helper_owner", ""))
+
+    if obj.get("dsm_rotate_enabled", False):
+        return obj
+
+    return None
+
+
 def _remove_constraint(obj, name):
+    if not obj:
+        return
     con = obj.constraints.get(name)
     if con:
         try:
@@ -32,8 +55,8 @@ def _remove_constraint(obj, name):
             pass
 
 
-def _remove_helper(obj):
-    helper_name = obj.get("dsm_rotate_helper", "")
+def _remove_legacy_helper(child):
+    helper_name = child.get("dsm_rotate_helper", "")
     helper = bpy.data.objects.get(helper_name) if helper_name else None
     if helper:
         for index in range(4):
@@ -44,125 +67,196 @@ def _remove_helper(obj):
             pass
 
 
-def _clear_legacy_delta_rotate(obj, restore=True):
-    """Remove the 0.1.0 delta-Euler implementation if present."""
-    axis = int(obj.get("dsm_rotate_axis_index", 2))
-    utils.remove_owned_driver(obj, "delta_rotation_euler", axis, MARKER)
-    if restore and "dsm_rotate_base_delta" in obj:
+def _clear_legacy_rotate(child):
+    _remove_constraint(child, LEGACY_ATTACH_CONSTRAINT)
+    _remove_constraint(child, LEGACY_SPIN_CONSTRAINT)
+    _remove_legacy_helper(child)
+
+    axis = int(child.get("dsm_rotate_axis_index", 2))
+    utils.remove_owned_driver(child, "delta_rotation_euler", axis, MARKER)
+    if "dsm_rotate_base_delta" in child:
         try:
-            obj.delta_rotation_euler = obj.get("dsm_rotate_base_delta", [0.0, 0.0, 0.0])
+            child.delta_rotation_euler = child.get("dsm_rotate_base_delta", [0.0, 0.0, 0.0])
         except Exception:
             pass
+
+
+def _control_matrix_from_world(world_matrix):
+    location, rotation, _scale = world_matrix.decompose()
+    return Matrix.LocRotScale(location, rotation, Vector((1.0, 1.0, 1.0)))
+
+
+def _create_control(child, context, original_parent, original_parent_type, original_parent_bone):
+    world = child.matrix_world.copy()
+    control = bpy.data.objects.new(f"{CONTROL_PREFIX}{child.name}", None)
+    control.empty_display_type = 'PLAIN_AXES'
+    control.empty_display_size = 0.65
+    control.show_in_front = True
+    control.hide_render = True
+    control["dsm_rotate_control"] = True
+    control["dsm_rotate_child"] = child.name
+
+    collection = child.users_collection[0] if child.users_collection else context.collection
+    collection.objects.link(control)
+
+    if original_parent:
+        control.parent = original_parent
+        try:
+            control.parent_type = original_parent_type
+        except Exception:
+            pass
+        if original_parent_type == 'BONE':
+            try:
+                control.parent_bone = original_parent_bone
+            except Exception:
+                pass
+
+    # The control represents placement/orientation only. Scale stays on child.
+    control.matrix_world = _control_matrix_from_world(world)
+
+    # Reparent the real object while preserving the exact visible transform.
+    child.parent = control
+    child.parent_type = 'OBJECT'
+    child.parent_bone = ""
+    child.matrix_parent_inverse = Matrix.Identity(4)
+    child.matrix_world = world
+
+    return control
+
+
+def _spin_quaternion_expressions(base_q, axis, angle_expr):
+    bw, bx, by, bz = [float(v) for v in base_q]
+    c = f"cos((({angle_expr}) * 0.5))"
+    s = f"sin((({angle_expr}) * 0.5))"
+
+    if axis == 'X':
+        return [
+            f"({bw:.12f})*({c}) - ({bx:.12f})*({s})",
+            f"({bw:.12f})*({s}) + ({bx:.12f})*({c})",
+            f"({by:.12f})*({c}) + ({bz:.12f})*({s})",
+            f"-({by:.12f})*({s}) + ({bz:.12f})*({c})",
+        ]
+
+    if axis == 'Y':
+        return [
+            f"({bw:.12f})*({c}) - ({by:.12f})*({s})",
+            f"({bx:.12f})*({c}) - ({bz:.12f})*({s})",
+            f"({bw:.12f})*({s}) + ({by:.12f})*({c})",
+            f"({bx:.12f})*({s}) + ({bz:.12f})*({c})",
+        ]
+
+    return [
+        f"({bw:.12f})*({c}) - ({bz:.12f})*({s})",
+        f"({bx:.12f})*({c}) + ({by:.12f})*({s})",
+        f"-({bx:.12f})*({s}) + ({by:.12f})*({c})",
+        f"({bw:.12f})*({s}) + ({bz:.12f})*({c})",
+    ]
 
 
 def clear_object(obj, restore=True):
-    if not obj or not obj.get("dsm_rotate_enabled", False):
+    child = _resolve_rotate_child(obj)
+    if not child or not child.get("dsm_rotate_enabled", False):
         return False
 
-    _remove_constraint(obj, SPIN_CONSTRAINT_NAME)
-    _remove_constraint(obj, ATTACH_CONSTRAINT_NAME)
-    _remove_helper(obj)
-    _clear_legacy_delta_rotate(obj, restore=restore)
+    # Clean previous experimental implementations as well.
+    _clear_legacy_rotate(child)
 
-    marker_prop = f"{MARKER}_value"
-    if marker_prop in obj:
+    control_name = child.get("dsm_rotate_control_name", "")
+    control = bpy.data.objects.get(control_name) if control_name else None
+
+    for index in range(4):
+        utils.remove_owned_driver(child, "rotation_quaternion", index, MARKER)
+
+    base_q = child.get("dsm_rotate_base_quaternion")
+    if base_q:
         try:
-            del obj[marker_prop]
+            child.rotation_mode = 'QUATERNION'
+            child.rotation_quaternion = tuple(float(v) for v in base_q)
         except Exception:
             pass
 
-    utils.clear_feature_props(obj, "rotate")
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+    # With spin removed, this is the artist-controlled, unspun world transform.
+    world = child.matrix_world.copy()
+
+    original_parent_name = child.get("dsm_rotate_original_parent", "")
+    original_parent = bpy.data.objects.get(original_parent_name) if original_parent_name else None
+    original_parent_type = child.get("dsm_rotate_original_parent_type", "OBJECT")
+    original_parent_bone = child.get("dsm_rotate_original_parent_bone", "")
+    original_rotation_mode = child.get("dsm_rotate_original_rotation_mode", "XYZ")
+
+    child.parent = original_parent
+    if original_parent:
+        try:
+            child.parent_type = original_parent_type
+        except Exception:
+            pass
+        if original_parent_type == 'BONE':
+            try:
+                child.parent_bone = original_parent_bone
+            except Exception:
+                pass
+    else:
+        child.parent_type = 'OBJECT'
+        child.parent_bone = ""
+
+    child.matrix_parent_inverse = Matrix.Identity(4)
+    child.matrix_world = world
+
+    try:
+        child.rotation_mode = original_rotation_mode
+    except Exception:
+        pass
+
+    if control:
+        try:
+            bpy.data.objects.remove(control, do_unlink=True)
+        except Exception:
+            pass
+
+    marker_prop = f"{MARKER}_value"
+    if marker_prop in child:
+        try:
+            del child[marker_prop]
+        except Exception:
+            pass
+
+    utils.clear_feature_props(child, "rotate")
     return True
 
 
-def _apply_attach_constraint(obj, target, bone_name):
-    _remove_constraint(obj, ATTACH_CONSTRAINT_NAME)
-    if not target:
-        return
-
-    target_matrix = utils.get_target_matrix(target, bone_name)
-    if target_matrix is None:
-        return
-
-    con = obj.constraints.new('CHILD_OF')
-    con.name = ATTACH_CONSTRAINT_NAME
-    con.target = target
-    if target.type == 'ARMATURE' and bone_name:
-        con.subtarget = bone_name
-
-    try:
-        con.inverse_matrix = target_matrix.inverted()
-    except Exception:
-        pass
-
-
-def _create_spin_helper(obj, context, axis, angle_expr):
-    helper = bpy.data.objects.new(f"{HELPER_PREFIX}{obj.name}", None)
-    helper.empty_display_type = 'PLAIN_AXES'
-    helper.empty_display_size = 0.001
-    helper.rotation_mode = 'QUATERNION'
-    helper.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-    helper.hide_render = True
-    helper.hide_select = True
-    helper["dsm_rotate_helper_owner"] = obj.name
-
-    collection = obj.users_collection[0] if obj.users_collection else context.collection
-    collection.objects.link(helper)
-
-    # IMPORTANT: do not call hide_set(True) or hide_viewport here.
-    # A Copy Rotation constraint depends on this object being evaluated by the
-    # active view layer. The helper is made tiny/unselectable instead.
-    try:
-        helper.hide_set(False)
-        helper.hide_viewport = False
-    except Exception:
-        pass
-
-    half_angle = f"(({angle_expr}) * 0.5)"
-    expressions = [f"cos({half_angle})", "0.0", "0.0", "0.0"]
-    axis_index = {'X': 1, 'Y': 2, 'Z': 3}[axis]
-    expressions[axis_index] = f"sin({half_angle})"
-
-    for index, expression in enumerate(expressions):
-        fc = utils.add_owned_driver(
-            helper,
-            "rotation_quaternion",
-            index,
-            expression,
-            MARKER,
-        )
-        if not fc:
-            try:
-                bpy.data.objects.remove(helper, do_unlink=True)
-            except Exception:
-                pass
-            return None
-
-    return helper
-
-
-def _apply_local_spin_constraint(obj, helper):
-    _remove_constraint(obj, SPIN_CONSTRAINT_NAME)
-    con = obj.constraints.new('COPY_ROTATION')
-    con.name = SPIN_CONSTRAINT_NAME
-    con.target = helper
-    con.use_x = True
-    con.use_y = True
-    con.use_z = True
-    con.invert_x = False
-    con.invert_y = False
-    con.invert_z = False
-    con.target_space = 'LOCAL'
-    con.owner_space = 'LOCAL'
-    con.mix_mode = 'AFTER'
-    return con
-
-
 def apply_object(obj, context):
+    # Reapplying from the control updates its child rather than rigging the Empty.
+    existing_child = _resolve_rotate_child(obj)
+    if existing_child:
+        obj = existing_child
+        clear_object(obj, restore=True)
+
     scene = context.scene
     settings = scene.dsm_settings
 
-    clear_object(obj, restore=True)
+    # Dead Simple must never destroy an artist's existing rotation animation.
+    if utils.has_animation_path(
+        obj,
+        {
+            "rotation_euler",
+            "rotation_quaternion",
+            "rotation_axis_angle",
+            "delta_rotation_euler",
+            "delta_rotation_quaternion",
+        },
+    ):
+        return False, "object already has rotation animation/drivers", None
+
+    original_parent = obj.parent
+    original_parent_name = original_parent.name if original_parent else ""
+    original_parent_type = obj.parent_type if original_parent else "OBJECT"
+    original_parent_bone = obj.parent_bone if original_parent and obj.parent_type == 'BONE' else ""
+    original_rotation_mode = obj.rotation_mode
 
     rng = utils.seeded_rng(obj, "rotate")
     speed_factor = utils.variation_factor(rng, settings.rotate_variation)
@@ -170,24 +264,52 @@ def apply_object(obj, context):
     speed = settings.rotate_speed * speed_factor
     angle_expr = _angle_expression(scene, speed, delay)
 
-    helper = _create_spin_helper(obj, context, settings.rotate_axis, angle_expr)
-    if helper is None:
-        return False, "could not create quaternion spin helper"
+    control = _create_control(
+        obj,
+        context,
+        original_parent,
+        original_parent_type,
+        original_parent_bone,
+    )
 
-    target = settings.rotate_target
-    bone = settings.rotate_bone.strip() if target and target.type == 'ARMATURE' else ""
+    # Child is now underneath an aligned control, so its own rotation is the
+    # true local spin layer. Quaternion multiplication keeps that spin local.
+    obj.rotation_mode = 'QUATERNION'
+    base_q = obj.rotation_quaternion.copy()
+    expressions = _spin_quaternion_expressions(base_q, settings.rotate_axis, angle_expr)
 
-    _apply_attach_constraint(obj, target, bone)
-    _apply_local_spin_constraint(obj, helper)
+    created = []
+    for index, expression in enumerate(expressions):
+        fc = utils.add_owned_driver(obj, "rotation_quaternion", index, expression, MARKER)
+        if not fc:
+            for made_index in created:
+                utils.remove_owned_driver(obj, "rotation_quaternion", made_index, MARKER)
+            try:
+                bpy.data.objects.remove(control, do_unlink=True)
+            except Exception:
+                pass
+            obj.parent = original_parent
+            obj.rotation_mode = original_rotation_mode
+            return False, "could not create quaternion rotate driver", None
+        created.append(index)
 
     obj["dsm_rotate_enabled"] = True
-    obj["dsm_rotate_helper"] = helper.name
+    obj["dsm_rotate_control_name"] = control.name
+    obj["dsm_rotate_base_quaternion"] = [float(v) for v in base_q]
     obj["dsm_rotate_axis"] = settings.rotate_axis
     obj["dsm_rotate_speed_factor"] = float(speed_factor)
     obj["dsm_rotate_delay"] = float(delay)
-    obj["dsm_rotate_target"] = target.name if target else ""
-    obj["dsm_rotate_bone"] = bone
-    return True, ""
+    obj["dsm_rotate_original_parent"] = original_parent_name
+    obj["dsm_rotate_original_parent_type"] = original_parent_type
+    obj["dsm_rotate_original_parent_bone"] = original_parent_bone
+    obj["dsm_rotate_original_rotation_mode"] = original_rotation_mode
+
+    try:
+        obj.update_tag()
+    except Exception:
+        pass
+
+    return True, "", control
 
 
 class DSM_OT_rotate_apply(Operator):
@@ -196,20 +318,42 @@ class DSM_OT_rotate_apply(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        target = context.scene.dsm_settings.rotate_target
-        objects = utils.selected_objects(context, target)
+        objects = utils.selected_objects(context)
         if not objects:
             self.report({'WARNING'}, "Select one or more objects")
             return {'CANCELLED'}
 
         success = 0
         skipped = []
+        controls = []
+
+        # A selected rotate control stands in for its child.
+        unique_objects = []
+        seen = set()
         for obj in objects:
-            ok, reason = apply_object(obj, context)
+            child = _resolve_rotate_child(obj) or obj
+            if child.name not in seen:
+                seen.add(child.name)
+                unique_objects.append(child)
+
+        for obj in unique_objects:
+            ok, reason, control = apply_object(obj, context)
             if ok:
                 success += 1
+                if control:
+                    controls.append(control)
             else:
                 skipped.append(f"{obj.name}: {reason}")
+
+        # The control is intentionally what the artist manipulates after Apply.
+        if controls:
+            try:
+                bpy.ops.object.select_all(action='DESELECT')
+                for control in controls:
+                    control.select_set(True)
+                context.view_layer.objects.active = controls[0]
+            except Exception:
+                pass
 
         if skipped:
             self.report({'WARNING'}, "; ".join(skipped[:3]))
@@ -223,7 +367,15 @@ class DSM_OT_rotate_clear(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        count = sum(1 for obj in utils.selected_objects(context) if clear_object(obj))
+        objects = utils.selected_objects(context)
+        count = 0
+        seen = set()
+        for obj in objects:
+            child = _resolve_rotate_child(obj)
+            if child and child.name not in seen:
+                seen.add(child.name)
+                if clear_object(child):
+                    count += 1
         self.report({'INFO'}, f"Rotate cleared on {count} object(s)")
         return {'FINISHED'}
 
