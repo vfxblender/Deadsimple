@@ -4,6 +4,9 @@ from mathutils import Matrix, Quaternion, Vector
 from bpy.types import Operator
 from . import utils
 
+FOCUS_PREFIX = "DSM_ORBIT_FOCUS_"
+FOCUS_CONSTRAINT_NAME = "DSM Orbit Camera Focus"
+
 
 def _plane_components(local, plane):
     if plane == 'XY':
@@ -26,12 +29,98 @@ def _target_for_object(obj):
     return bpy.data.objects.get(name) if name else None
 
 
+def _resolve_orbit_object(obj):
+    if not obj:
+        return None
+    if obj.get("dsm_orbit_focus_owner"):
+        return bpy.data.objects.get(obj.get("dsm_orbit_focus_owner", ""))
+    if obj.get("dsm_orbit_enabled", False):
+        return obj
+    return None
+
+
+def _remove_camera_focus(camera):
+    if not camera:
+        return
+
+    con = camera.constraints.get(FOCUS_CONSTRAINT_NAME)
+    if con:
+        try:
+            camera.constraints.remove(con)
+        except Exception:
+            pass
+
+    focus_name = camera.get("dsm_orbit_focus_name", "")
+    focus = bpy.data.objects.get(focus_name) if focus_name else None
+    if focus:
+        try:
+            bpy.data.objects.remove(focus, do_unlink=True)
+        except Exception:
+            pass
+
+
+def _create_camera_focus(camera, context, target, bone_name, pivot_world, radius):
+    """Create a user-movable focus Empty for an orbiting camera.
+
+    The focus starts exactly at the orbit pivot. When there is an object/bone
+    target, the Empty is parented to that target while preserving its world
+    transform, so it follows target motion but can still be offset by the user.
+    """
+    _remove_camera_focus(camera)
+
+    focus = bpy.data.objects.new(f"{FOCUS_PREFIX}{camera.name}", None)
+    focus.empty_display_type = 'SPHERE'
+    focus.empty_display_size = max(0.35, min(float(radius) * 0.08, 2.0))
+    focus.show_in_front = True
+    focus.hide_render = True
+    focus["dsm_orbit_focus_owner"] = camera.name
+
+    collection = camera.users_collection[0] if camera.users_collection else context.collection
+    collection.objects.link(focus)
+
+    if target:
+        focus.parent = target
+        if target.type == 'ARMATURE' and bone_name:
+            try:
+                focus.parent_type = 'BONE'
+                focus.parent_bone = bone_name
+            except Exception:
+                focus.parent_type = 'OBJECT'
+        else:
+            focus.parent_type = 'OBJECT'
+
+    # Set after parenting so the default visible position is precisely the
+    # orbit origin/pivot rather than a parent-space offset.
+    focus.matrix_world = Matrix.Translation(Vector(pivot_world))
+
+    con = camera.constraints.new('DAMPED_TRACK')
+    con.name = FOCUS_CONSTRAINT_NAME
+    con.target = focus
+    con.track_axis = 'TRACK_NEGATIVE_Z'
+
+    camera["dsm_orbit_focus_name"] = focus.name
+    return focus
+
+
 def clear_object(obj, restore=True):
-    if not obj or not obj.get("dsm_orbit_enabled", False):
+    child = _resolve_orbit_object(obj) or obj
+    if not child or not child.get("dsm_orbit_enabled", False):
         return False
+
+    seed = child.get("dsm_orbit_seed")
+
+    if child.type == 'CAMERA':
+        _remove_camera_focus(child)
+
     if restore:
-        utils.set_world_location(obj, utils.unpack_vector(obj.get("dsm_orbit_start_world", (0.0, 0.0, 0.0))))
-    utils.clear_feature_props(obj, "orbit")
+        utils.set_world_location(
+            child,
+            utils.unpack_vector(child.get("dsm_orbit_start_world", (0.0, 0.0, 0.0))),
+        )
+
+    utils.clear_feature_props(child, "orbit")
+    if seed is not None:
+        child["dsm_orbit_seed"] = int(seed)
     return True
 
 
@@ -64,12 +153,9 @@ def _sphere_precession_axis(e1, e2, rng):
         if axis.length < 1e-5:
             continue
         axis.normalize()
-        # If the axis is too close to the plane normal, the plane would mostly
-        # spin around itself and would not visibly precess in 3D.
         if abs(axis.dot(plane_normal)) < 0.80:
             return axis
 
-    # Deterministic fallback that is not parallel to the plane normal.
     axis = e1 + plane_normal * 0.35
     if axis.length < 1e-5:
         axis = Vector((1.0, 0.0, 0.0))
@@ -78,6 +164,10 @@ def _sphere_precession_axis(e1, e2, rng):
 
 
 def apply_object(obj, context, index=0, count=1):
+    existing = _resolve_orbit_object(obj)
+    if existing:
+        obj = existing
+
     scene = context.scene
     settings = scene.dsm_settings
 
@@ -87,7 +177,7 @@ def apply_object(obj, context, index=0, count=1):
     clear_object(obj, restore=True)
 
     if utils.has_animation_path(obj, {"location"}):
-        return False, "location already has animation or drivers"
+        return False, "location already has animation or drivers", None
 
     target = settings.orbit_target
     bone = settings.orbit_bone.strip() if target and target.type == 'ARMATURE' else ""
@@ -95,6 +185,7 @@ def apply_object(obj, context, index=0, count=1):
     if target_matrix is None:
         target_matrix = Matrix.Translation(scene.cursor.location)
 
+    pivot_world = target_matrix.translation.copy()
     world = utils.get_world_location(obj)
     local = target_matrix.inverted() @ world
 
@@ -113,9 +204,6 @@ def apply_object(obj, context, index=0, count=1):
     obj["dsm_orbit_speed"] = float(speed)
 
     if shape == 'SPHERE':
-        # Sphere is a true 3D precessing orbit. The object first travels in a
-        # great-circle plane, then that entire plane rotates around a second 3D
-        # axis over time. This creates the electron / atom style motion.
         e1, e2, radius = _sphere_basis(local, rng)
         precession_axis = _sphere_precession_axis(e1, e2, rng)
 
@@ -154,7 +242,19 @@ def apply_object(obj, context, index=0, count=1):
         obj["dsm_orbit_normal"] = float(normal)
         obj["dsm_orbit_phase"] = float(phase)
 
-    return True, ""
+    focus = None
+    if obj.type == 'CAMERA':
+        radius_for_focus = float(obj.get("dsm_orbit_radius", max(local.length, 1.0)))
+        focus = _create_camera_focus(
+            obj,
+            context,
+            target,
+            bone,
+            pivot_world,
+            radius_for_focus,
+        )
+
+    return True, "", focus
 
 
 def update_object(obj, scene):
@@ -176,12 +276,8 @@ def update_object(obj, scene):
     if shape == 'SPHERE':
         e1 = utils.unpack_vector(obj.get("dsm_orbit_basis1", (1, 0, 0)))
         e2 = utils.unpack_vector(obj.get("dsm_orbit_basis2", (0, 1, 0)))
-
-        # First orbit in the object's local great-circle plane.
         circle_point = radius * (e1 * math.cos(t) + e2 * math.sin(t))
 
-        # Then rotate that entire plane around a second 3D axis. This is the
-        # precession layer that turns a flat orbit into an atom/electron path.
         precession_axis = utils.unpack_vector(obj.get("dsm_orbit_precession_axis", (0, 0, 1)))
         if precession_axis.length < 1e-5:
             precession_axis = Vector((0.0, 0.0, 1.0))
@@ -225,23 +321,44 @@ class DSM_OT_orbit_apply(Operator):
 
     def execute(self, context):
         target = context.scene.dsm_settings.orbit_target
-        objects = utils.selected_objects(context, target)
-        if not objects:
+        selected = utils.selected_objects(context, target)
+        if not selected:
             self.report({'WARNING'}, "Select one or more orbiting objects")
             return {'CANCELLED'}
 
+        objects = []
+        seen = set()
+        for item in selected:
+            obj = _resolve_orbit_object(item) or item
+            if obj.name not in seen:
+                seen.add(obj.name)
+                objects.append(obj)
+
         success = 0
         skipped = []
+        focus_empties = []
         total = len(objects)
 
         for index, obj in enumerate(objects):
-            ok, reason = apply_object(obj, context, index, total)
+            ok, reason, focus = apply_object(obj, context, index, total)
             if ok:
                 success += 1
+                if focus:
+                    focus_empties.append(focus)
             else:
                 skipped.append(f"{obj.name}: {reason}")
 
         update_all(context.scene)
+
+        # For a single orbiting camera, make the new focus Empty immediately
+        # available to the artist without making camera orbit setup cumbersome.
+        if len(objects) == 1 and focus_empties:
+            try:
+                bpy.ops.object.select_all(action='DESELECT')
+                focus_empties[0].select_set(True)
+                context.view_layer.objects.active = focus_empties[0]
+            except Exception:
+                pass
 
         if skipped:
             self.report({'WARNING'}, "; ".join(skipped[:3]))
@@ -255,7 +372,15 @@ class DSM_OT_orbit_clear(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        count = sum(1 for obj in utils.selected_objects(context) if clear_object(obj))
+        selected = utils.selected_objects(context)
+        count = 0
+        seen = set()
+        for item in selected:
+            obj = _resolve_orbit_object(item)
+            if obj and obj.name not in seen:
+                seen.add(obj.name)
+                if clear_object(obj):
+                    count += 1
         self.report({'INFO'}, f"Orbit cleared on {count} object(s)")
         return {'FINISHED'}
 
