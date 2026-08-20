@@ -90,7 +90,6 @@ def _apply_attach_constraint(obj, target, bone_name):
     if target.type == 'ARMATURE' and bone_name:
         con.subtarget = bone_name
 
-    # Keep the object exactly where it is when attachment is enabled.
     try:
         con.inverse_matrix = target_matrix.inverted()
     except Exception:
@@ -100,7 +99,7 @@ def _apply_attach_constraint(obj, target, bone_name):
 def _create_spin_helper(obj, context, axis, angle_expr):
     helper = bpy.data.objects.new(f"{HELPER_PREFIX}{obj.name}", None)
     helper.empty_display_type = 'PLAIN_AXES'
-    helper.empty_display_size = 0.25
+    helper.empty_display_size = 0.001
     helper.rotation_mode = 'QUATERNION'
     helper.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
     helper.hide_render = True
@@ -110,10 +109,12 @@ def _create_spin_helper(obj, context, axis, angle_expr):
     collection = obj.users_collection[0] if obj.users_collection else context.collection
     collection.objects.link(helper)
 
-    # Keep the helper out of the artist's way while still allowing dependency
-    # graph evaluation for the Copy Rotation constraint.
+    # IMPORTANT: do not call hide_set(True) or hide_viewport here.
+    # A Copy Rotation constraint depends on this object being evaluated by the
+    # active view layer. The helper is made tiny/unselectable instead.
     try:
-        helper.hide_set(True)
+        helper.hide_set(False)
+        helper.hide_viewport = False
     except Exception:
         pass
 
@@ -153,10 +154,6 @@ def _apply_local_spin_constraint(obj, helper):
     con.invert_z = False
     con.target_space = 'LOCAL'
     con.owner_space = 'LOCAL'
-
-    # AFTER means the helper rotation is applied as though the helper were a
-    # child of the owner. This is the critical behavior that keeps the spin on
-    # the object's CURRENT local axis even when the artist reorients it.
     con.mix_mode = 'AFTER'
     return con
 
