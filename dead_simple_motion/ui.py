@@ -130,10 +130,10 @@ class DSM_PT_main(Panel):
         elif settings.tool == 'FOLLOW':
             box = layout.box()
             _target_bone_ui(box, settings, "follow_target", "follow_bone")
-            box.prop(settings, "follow_smoothness", text="Smoothness")
+            box.prop(settings, "follow_delay", text="Delay")
             box.prop(settings, "follow_drift", text="Drift")
             box.prop(settings, "follow_variation", text="Variation")
-            box.label(text="Follows location live; cameras are supported", icon='CAMERA_DATA')
+            box.label(text="Location follow only; bone rotation will not orbit", icon='CAMERA_DATA')
             _apply_clear_row(box, "dsm.follow_apply", "dsm.follow_clear", "Apply Follow")
 
         layout.separator(factor=0.8)
