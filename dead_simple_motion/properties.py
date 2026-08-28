@@ -1,12 +1,5 @@
 import bpy
-from bpy.props import (
-    BoolProperty,
-    EnumProperty,
-    FloatProperty,
-    IntProperty,
-    PointerProperty,
-    StringProperty,
-)
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import PropertyGroup
 
 
@@ -18,34 +11,62 @@ def _preset_update(self, context):
         pass
 
 
+AXIS_ITEMS = [("X", "X", ""), ("Y", "Y", ""), ("Z", "Z", "")]
+FORWARD_AXIS_ITEMS = [
+    ("Y", "+Y", ""),
+    ("-Y", "-Y", ""),
+    ("X", "+X", ""),
+    ("-X", "-X", ""),
+    ("Z", "+Z", ""),
+    ("-Z", "-Z", ""),
+]
+
+
 class DSM_Settings(PropertyGroup):
     tool: EnumProperty(
         name="Tool",
         items=[
-            ('ROTATE', "Rotate", "Spin selected objects"),
-            ('ORBIT', "Orbit", "Orbit around an object, bone, or 3D cursor"),
-            ('SPAWN', "Spawn", "Spawn traffic or loop motion"),
-            ('FOLLOW', "Follow", "Smooth live location follow"),
-            ('FX', "FX", "Layered organic motion"),
+            ("ROTATE", "Rotate", "Spin selected objects"),
+            ("ORBIT", "Orbit", "Orbit around an object, bone, or 3D cursor"),
+            ("SPAWN", "Spawn", "Spawn traffic or loop motion"),
+            ("FOLLOW", "Follow", "Smooth live location follow"),
+            ("FX", "FX", "Layered organic motion"),
         ],
-        default='ROTATE',
+        default="ROTATE",
     )
 
-    rotate_axis: EnumProperty(name="Axis", items=[('X', 'X', ''), ('Y', 'Y', ''), ('Z', 'Z', '')], default='Z')
+    rotate_axis: EnumProperty(name="Axis", items=AXIS_ITEMS, default="Z")
     rotate_speed: FloatProperty(name="Speed", default=1.0, min=-20.0, max=20.0)
-    rotate_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
-    rotate_target: PointerProperty(name="Target", type=bpy.types.Object)
-    rotate_bone: StringProperty(name="Bone", default="")
+    rotate_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype="PERCENTAGE")
     rotate_use_start: BoolProperty(name="Use Key In", default=True)
     rotate_use_end: BoolProperty(name="Use Key Out", default=True)
     rotate_start: IntProperty(name="Key In", default=1)
     rotate_end: IntProperty(name="Key Out", default=250)
+    rotate_advanced: BoolProperty(name="Advanced", default=False)
 
     orbit_target: PointerProperty(name="Target", type=bpy.types.Object)
     orbit_bone: StringProperty(name="Bone", default="")
-    orbit_plane: EnumProperty(name="Plane", items=[('XY', 'XY', ''), ('XZ', 'XZ', ''), ('YZ', 'YZ', '')], default='XY')
-    orbit_shape: EnumProperty(name="Shape", items=[('CIRCLE', 'Circle', ''), ('ELLIPSE', 'Ellipse', ''), ('INFINITY', 'Infinity', ''), ('SQUARE', 'Square', ''), ('SPHERE', 'Sphere', '3D precessing orbital plane')], default='CIRCLE')
-    orbit_behavior: EnumProperty(name="Behavior", items=[('NORMAL', 'Normal', 'Preserve current placement'), ('OFFSET', 'Offset', 'Evenly distribute selection'), ('RANDOM', 'Random', 'Randomize starting phase')], default='NORMAL')
+    orbit_plane: EnumProperty(name="Plane", items=[("XY", "XY", ""), ("XZ", "XZ", ""), ("YZ", "YZ", "")], default="XY")
+    orbit_shape: EnumProperty(
+        name="Shape",
+        items=[
+            ("CIRCLE", "Circle", ""),
+            ("ELLIPSE", "Ellipse", ""),
+            ("INFINITY", "Infinity", ""),
+            ("SQUARE", "Square", ""),
+            ("SPHERE", "Sphere", "3D precessing orbital plane"),
+        ],
+        default="CIRCLE",
+    )
+    orbit_behavior: EnumProperty(
+        name="Behavior",
+        items=[
+            ("NORMAL", "Normal", "Preserve current placement"),
+            ("OFFSET", "Offset", "Evenly distribute selection"),
+            ("RANDOM", "Random", "Randomize starting phase"),
+        ],
+        default="NORMAL",
+    )
     orbit_speed: FloatProperty(name="Speed", default=1.0, min=-20.0, max=20.0)
     orbit_sphere_axis_speed: FloatProperty(
         name="Axis Speed",
@@ -54,95 +75,101 @@ class DSM_Settings(PropertyGroup):
         min=-5.0,
         max=5.0,
     )
-    orbit_face_direction: BoolProperty(
-        name="Face Direction",
-        description="Rotate the orbiting object so its forward axis points along the direction of travel",
-        default=True,
+    orbit_orientation: EnumProperty(
+        name="Orientation",
+        description="How the orbiting object rotates while traveling",
+        items=[
+            ("NONE", "None", "Preserve the object's rotation"),
+            ("DIRECTION", "Face Direction", "Point along the direction of travel"),
+            ("TARGET", "Face Target", "Keep the chosen forward side facing the orbit center, like a moon"),
+        ],
+        default="TARGET",
     )
     orbit_forward_axis: EnumProperty(
-        name="Forward",
-        description="Local axis that should point along the orbit path",
-        items=[
-            ('Y', '+Y', ''),
-            ('-Y', '-Y', ''),
-            ('X', '+X', ''),
-            ('-X', '-X', ''),
-            ('Z', '+Z', ''),
-            ('-Z', '-Z', ''),
-        ],
-        default='Y',
+        name="Forward Axis",
+        description="Local axis that points toward the travel direction or orbit target",
+        items=FORWARD_AXIS_ITEMS,
+        default="Y",
     )
-    orbit_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
+    orbit_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype="PERCENTAGE")
     orbit_fallback_radius: FloatProperty(name="Radius", default=2.0, min=0.001)
+    orbit_advanced: BoolProperty(name="Advanced", default=False)
 
-    fx_preset: EnumProperty(
-        name="Preset",
+    spawn_mode: EnumProperty(
+        name="Mode",
         items=[
-            ('SCIFI_DRONE', 'Sci-Fi Drone', ''),
-            ('SPACE_DEBRIS', 'Space Debris', ''),
-            ('ENGINE', 'Engine Vibration', ''),
-            ('BREATHING', 'Breathing', ''),
-            ('MAGIC_HOVER', 'Magic Hover', ''),
-            ('ALAKAZAM', 'Alakazam!', ''),
-            ('HANDHELD_CAMERA', 'Handheld Camera', ''),
-            ('FLOATING_UI', 'Floating UI', ''),
-            ('ENGINE_IDLE', 'Engine Idle', ''),
-            ('HEAVY_MACHINERY', 'Heavy Machinery', ''),
-            ('UNDERWATER', 'Underwater', ''),
-            ('DRUNK_CAMERA', 'Drunk Camera', ''),
-            ('MICRO_JITTER', 'Micro Jitter', ''),
-            ('HOVERCRAFT', 'Hovercraft', ''),
+            ("SPAWN", "Spawn", "Travel, hide/reset, and respawn"),
+            ("LOOPER", "Looper", "Travel back and forth"),
         ],
-        default='SCIFI_DRONE',
-        update=_preset_update,
+        default="SPAWN",
     )
-    fx_amount: FloatProperty(name="Amount", default=1.0, min=0.0, max=10.0)
-    fx_speed: FloatProperty(name="Speed", default=1.0, min=0.0, max=20.0)
-    fx_variation: FloatProperty(name="Variation", default=0.12, min=0.0, max=0.5, subtype='PERCENTAGE')
-    fx_advanced: BoolProperty(name="Advanced", default=False)
-    fx_float: FloatProperty(name="Float", default=0.35, min=0.0, max=10.0)
-    fx_wobble: FloatProperty(name="Wobble", default=0.08, min=0.0, max=3.14159)
-    fx_scale: FloatProperty(name="Scale Pulse", default=0.03, min=0.0, max=1.0)
-    fx_bob: FloatProperty(name="Bob", default=0.15, min=0.0, max=10.0)
-    fx_bob_axis: EnumProperty(name="Bob Axis", items=[('X', 'X', ''), ('Y', 'Y', ''), ('Z', 'Z', '')], default='Z')
-    fx_shake: FloatProperty(name="Shake", default=0.02, min=0.0, max=5.0)
-    fx_shake_speed: FloatProperty(name="Shake Speed", default=8.0, min=0.0, max=50.0)
-
-    spawn_mode: EnumProperty(name="Mode", items=[('SPAWN', 'Spawn', 'Travel, hide/reset, and respawn'), ('LOOPER', 'Looper', 'Travel back and forth')], default='SPAWN')
-    spawn_axis: EnumProperty(name="Axis", items=[('X', 'X', ''), ('Y', 'Y', ''), ('Z', 'Z', '')], default='X')
+    spawn_axis: EnumProperty(name="Axis", items=AXIS_ITEMS, default="X")
     spawn_speed: FloatProperty(name="Speed", default=0.1, min=-100.0, max=100.0)
     spawn_distance: FloatProperty(name="Distance", default=10.0, min=0.001)
     spawn_fade_in_point: FloatProperty(
         name="Fade In Point",
-        description="Point along the path where acceleration finishes. Lower values reach full speed sooner",
+        description="Point along the path where acceleration finishes",
         default=0.15,
         min=0.0,
         max=1.0,
-        subtype='FACTOR',
+        subtype="FACTOR",
     )
     spawn_fade_out_point: FloatProperty(
         name="Fade Out Point",
-        description="Point along the path where deceleration begins. Useful for smooth Looper camera-slider turnarounds",
+        description="Point along the path where deceleration begins",
         default=0.85,
         min=0.0,
         max=1.0,
-        subtype='FACTOR',
+        subtype="FACTOR",
     )
-    spawn_variation: FloatProperty(name="Variation", default=0.12, min=0.0, max=0.5, subtype='PERCENTAGE')
+    spawn_variation: FloatProperty(name="Variation", default=0.12, min=0.0, max=0.5, subtype="PERCENTAGE")
+    spawn_advanced: BoolProperty(name="Advanced", default=False)
 
     follow_target: PointerProperty(name="Target", type=bpy.types.Object)
     follow_bone: StringProperty(name="Bone", default="")
     follow_delay: FloatProperty(
         name="Delay",
-        description="How slowly the follower catches up to the target. 0 follows immediately; higher values trail farther behind",
+        description="How slowly the follower catches up. 0 is immediate; higher values create more lag",
         default=35.0,
         min=0.0,
         max=100.0,
     )
-    # Kept for compatibility with early alpha .blend files. The UI no longer uses it.
-    follow_smoothness: FloatProperty(name="Smoothness", default=0.55, min=0.0, max=1.0)
     follow_drift: FloatProperty(name="Drift", default=0.12, min=0.0, max=10.0)
-    follow_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype='PERCENTAGE')
+    follow_variation: FloatProperty(name="Variation", default=0.08, min=0.0, max=0.5, subtype="PERCENTAGE")
+    follow_advanced: BoolProperty(name="Advanced", default=False)
+
+    fx_preset: EnumProperty(
+        name="Preset",
+        items=[
+            ("SCIFI_DRONE", "Sci-Fi Drone", ""),
+            ("SPACE_DEBRIS", "Space Debris", ""),
+            ("ENGINE", "Engine Vibration", ""),
+            ("BREATHING", "Breathing", ""),
+            ("MAGIC_HOVER", "Magic Hover", ""),
+            ("ALAKAZAM", "Alakazam!", ""),
+            ("HANDHELD_CAMERA", "Handheld Camera", ""),
+            ("FLOATING_UI", "Floating UI", ""),
+            ("ENGINE_IDLE", "Engine Idle", ""),
+            ("HEAVY_MACHINERY", "Heavy Machinery", ""),
+            ("UNDERWATER", "Underwater", ""),
+            ("DRUNK_CAMERA", "Drunk Camera", ""),
+            ("MICRO_JITTER", "Micro Jitter", ""),
+            ("HOVERCRAFT", "Hovercraft", ""),
+        ],
+        default="SCIFI_DRONE",
+        update=_preset_update,
+    )
+    fx_amount: FloatProperty(name="Amount", default=1.0, min=0.0, max=10.0)
+    fx_speed: FloatProperty(name="Speed", default=1.0, min=0.0, max=20.0)
+    fx_variation: FloatProperty(name="Variation", default=0.12, min=0.0, max=0.5, subtype="PERCENTAGE")
+    fx_advanced: BoolProperty(name="Advanced", default=False)
+    fx_float: FloatProperty(name="Float", default=0.35, min=0.0, max=10.0)
+    fx_wobble: FloatProperty(name="Wobble", default=0.08, min=0.0, max=3.14159)
+    fx_scale: FloatProperty(name="Scale Pulse", default=0.03, min=0.0, max=1.0)
+    fx_bob: FloatProperty(name="Bob", default=0.15, min=0.0, max=10.0)
+    fx_bob_axis: EnumProperty(name="Bob Axis", items=AXIS_ITEMS, default="Z")
+    fx_shake: FloatProperty(name="Shake", default=0.02, min=0.0, max=5.0)
+    fx_shake_speed: FloatProperty(name="Shake Speed", default=8.0, min=0.0, max=50.0)
 
 
 _CLASSES = (DSM_Settings,)

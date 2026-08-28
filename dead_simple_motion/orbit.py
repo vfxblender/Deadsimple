@@ -1,11 +1,20 @@
 import math
+
 import bpy
-from mathutils import Matrix, Quaternion, Vector
 from bpy.types import Operator
+from mathutils import Matrix, Quaternion, Vector
+
 from . import utils
 
 FOCUS_PREFIX = "DSM_ORBIT_FOCUS_"
-LEGACY_FOCUS_CONSTRAINT = "DSM Orbit Camera Focus"
+OLD_FOCUS_CONSTRAINT = "DSM Orbit Camera Focus"
+ROTATION_PATHS = {
+    "rotation_euler",
+    "rotation_quaternion",
+    "rotation_axis_angle",
+    "delta_rotation_euler",
+    "delta_rotation_quaternion",
+}
 
 
 def _plane_components(local, plane):
@@ -29,84 +38,41 @@ def _target_for(obj):
     return bpy.data.objects.get(name) if name else None
 
 
+def _focus_for(obj):
+    name = obj.get("dsm_orbit_focus_name", "")
+    return bpy.data.objects.get(name) if name else None
+
+
 def _resolve(obj):
     if not obj:
         return None
-    if obj.get("dsm_orbit_focus_owner"):
-        return bpy.data.objects.get(obj.get("dsm_orbit_focus_owner", ""))
+    owner = utils.resolve_focus_owner(obj, "orbit")
+    if owner:
+        return owner
     if obj.get("dsm_orbit_enabled", False):
         return obj
     return None
 
 
-def _set_world_rotation(obj, quat):
-    location, _rot, scale = obj.matrix_world.decompose()
-    obj.matrix_world = Matrix.LocRotScale(location, quat, scale)
-
-
-def _remove_focus(camera):
-    if not camera:
-        return
-    con = camera.constraints.get(LEGACY_FOCUS_CONSTRAINT)
-    if con:
-        try:
-            camera.constraints.remove(con)
-        except Exception:
-            pass
-
-    name = camera.get("dsm_orbit_focus_name", "")
-    focus = bpy.data.objects.get(name) if name else None
-    if focus:
-        try:
-            bpy.data.objects.remove(focus, do_unlink=True)
-        except Exception:
-            pass
-
-
 def _create_focus(camera, context, target, bone, pivot, radius):
-    _remove_focus(camera)
-
-    focus = bpy.data.objects.new(f"{FOCUS_PREFIX}{camera.name}", None)
-    focus.empty_display_type = "SPHERE"
-    focus.empty_display_size = max(0.35, min(float(radius) * 0.08, 2.0))
-    focus.show_in_front = True
-    focus.hide_render = True
-    focus["dsm_orbit_focus_owner"] = camera.name
-
-    collection = camera.users_collection[0] if camera.users_collection else context.collection
-    collection.objects.link(focus)
+    focus = utils.create_focus_empty(
+        context,
+        camera,
+        "orbit",
+        FOCUS_PREFIX,
+        pivot,
+        display_size=max(0.25, min(float(radius) * 0.06, 1.25)),
+    )
 
     if target:
         focus.parent = target
         if target.type == "ARMATURE" and bone:
-            try:
-                focus.parent_type = "BONE"
-                focus.parent_bone = bone
-            except Exception:
-                focus.parent_type = "OBJECT"
+            focus.parent_type = "BONE"
+            focus.parent_bone = bone
         else:
             focus.parent_type = "OBJECT"
         focus.matrix_world = Matrix.Translation(Vector(pivot))
-    else:
-        focus.location = Vector(pivot)
-
-    camera["dsm_orbit_focus_name"] = focus.name
     return focus
-
-
-def _aim_camera(camera):
-    name = camera.get("dsm_orbit_focus_name", "")
-    focus = bpy.data.objects.get(name) if name else None
-    if not focus:
-        return
-    direction = focus.matrix_world.translation - camera.matrix_world.translation
-    if direction.length < 1e-7:
-        return
-    try:
-        quat = direction.normalized().to_track_quat("-Z", "Y")
-        _set_world_rotation(camera, quat)
-    except Exception:
-        pass
 
 
 def _sphere_basis(local, rng):
@@ -179,27 +145,54 @@ def _local_at(obj, frame):
     return _plane_vector(u, v, normal, obj.get("dsm_orbit_plane", "XY"))
 
 
+def _apply_orientation(obj, matrix, local, world, scene):
+    if obj.type == "CAMERA":
+        focus = _focus_for(obj)
+        if focus:
+            utils.aim_camera_at(obj, focus)
+        return
+
+    orientation = obj.get("dsm_orbit_orientation", "NONE")
+    if orientation == "NONE":
+        return
+
+    direction = None
+    if orientation == "TARGET":
+        direction = matrix.translation - world
+    elif orientation == "DIRECTION":
+        next_local = _local_at(obj, float(scene.frame_current) + 0.25)
+        direction = (matrix @ next_local) - world
+
+    if direction is None or direction.length <= 1e-7:
+        return
+
+    forward = obj.get("dsm_orbit_forward_axis", "Y")
+    up = "Y" if forward in {"Z", "-Z"} else "Z"
+    try:
+        utils.set_world_rotation(obj, direction.normalized().to_track_quat(forward, up))
+    except Exception:
+        pass
+
+
 def clear_object(obj, restore=True):
     child = _resolve(obj) or obj
     if not child or not child.get("dsm_orbit_enabled", False):
         return False
 
-    seed = child.get("dsm_orbit_seed")
-    if child.type == "CAMERA":
-        _remove_focus(child)
+    utils.remove_named_constraint(child, OLD_FOCUS_CONSTRAINT)
+    utils.remove_focus_empty(child, "orbit")
 
     if restore:
         utils.set_world_location(child, utils.unpack_vector(child.get("dsm_orbit_start_world", (0, 0, 0))))
         start_rot = child.get("dsm_orbit_start_rotation")
         if start_rot and len(start_rot) == 4:
             try:
-                _set_world_rotation(child, Quaternion(tuple(float(v) for v in start_rot)))
+                utils.set_world_rotation(child, Quaternion(tuple(float(v) for v in start_rot)))
             except Exception:
                 pass
 
     utils.clear_feature_props(child, "orbit")
-    if seed is not None:
-        child["dsm_orbit_seed"] = int(seed)
+    child.hide_select = False
     return True
 
 
@@ -208,40 +201,36 @@ def apply_object(obj, context, index=0, count=1):
     if existing:
         obj = existing
 
-    seed = obj.get("dsm_orbit_seed")
+    from . import follow, spawn
 
-    from . import spawn, follow
     spawn.clear_object(obj, restore=True)
     follow.clear_object(obj, restore=True)
     clear_object(obj, restore=True)
-
-    if seed is not None:
-        obj["dsm_orbit_seed"] = int(seed)
 
     if utils.has_animation_path(obj, {"location"}):
         return False, "location already has animation or drivers", None
 
     scene = context.scene
-    s = scene.dsm_settings
-    target = s.orbit_target
-    bone = s.orbit_bone.strip() if target and target.type == "ARMATURE" else ""
+    settings = scene.dsm_settings
+    target = settings.orbit_target
+    bone = settings.orbit_bone.strip() if target and target.type == "ARMATURE" else ""
     matrix = utils.get_target_matrix(target, bone)
     if matrix is None:
         matrix = Matrix.Translation(scene.cursor.location)
+
+    orientation = settings.orbit_orientation if obj.type != "CAMERA" else "NONE"
+    if (obj.type == "CAMERA" or orientation != "NONE") and utils.has_animation_path(obj, ROTATION_PATHS):
+        return False, "rotation already has animation or drivers", None
 
     world = utils.get_world_location(obj)
     local = matrix.inverted() @ world
     pivot = matrix.translation.copy()
     start_rotation = obj.matrix_world.to_quaternion().copy()
 
-    face = bool(s.orbit_face_direction and obj.type != "CAMERA")
-    if face and utils.has_animation_path(obj, {"rotation_euler", "rotation_quaternion", "rotation_axis_angle", "delta_rotation_euler", "delta_rotation_quaternion"}):
-        return False, "rotation already animated; disable Face Direction", None
-
     rng = utils.seeded_rng(obj, "orbit")
-    speed_factor = utils.variation_factor(rng, s.orbit_variation)
-    speed = float(s.orbit_speed * speed_factor)
-    shape = s.orbit_shape
+    speed_factor = utils.variation_factor(rng, settings.orbit_variation)
+    speed = float(settings.orbit_speed * speed_factor)
+    shape = settings.orbit_shape
 
     obj["dsm_orbit_enabled"] = True
     obj["dsm_orbit_start_world"] = utils.pack_vector(world)
@@ -249,41 +238,43 @@ def apply_object(obj, context, index=0, count=1):
     obj["dsm_orbit_target"] = target.name if target else ""
     obj["dsm_orbit_bone"] = bone
     obj["dsm_orbit_pivot"] = utils.pack_vector(scene.cursor.location)
-    obj["dsm_orbit_plane"] = s.orbit_plane
+    obj["dsm_orbit_plane"] = settings.orbit_plane
     obj["dsm_orbit_shape"] = shape
     obj["dsm_orbit_speed"] = speed
-    obj["dsm_orbit_face_direction"] = face
-    obj["dsm_orbit_forward_axis"] = s.orbit_forward_axis
+    obj["dsm_orbit_orientation"] = orientation
+    obj["dsm_orbit_forward_axis"] = settings.orbit_forward_axis
 
     if shape == "SPHERE":
         e1, e2, radius = _sphere_basis(local, rng)
         axis = _precession_axis(e1, e2, rng)
         phase = -(scene.frame_current * speed * 0.02)
-        if s.orbit_behavior == "OFFSET" and count > 1:
+        if settings.orbit_behavior == "OFFSET" and count > 1:
             phase += 2.0 * math.pi * index / count
-        elif s.orbit_behavior == "RANDOM":
+        elif settings.orbit_behavior == "RANDOM":
             phase += rng.uniform(0.0, 2.0 * math.pi)
 
         obj["dsm_orbit_basis1"] = utils.pack_vector(e1)
         obj["dsm_orbit_basis2"] = utils.pack_vector(e2)
         obj["dsm_orbit_precession_axis"] = utils.pack_vector(axis)
-        obj["dsm_orbit_axis_speed"] = float(s.orbit_sphere_axis_speed * utils.variation_factor(rng, s.orbit_variation * 0.5))
+        obj["dsm_orbit_axis_speed"] = float(
+            settings.orbit_sphere_axis_speed * utils.variation_factor(rng, settings.orbit_variation * 0.5)
+        )
         obj["dsm_orbit_axis_start_frame"] = float(scene.frame_current)
-        obj["dsm_orbit_radius"] = float(max(radius, s.orbit_fallback_radius if radius < 1e-4 else radius))
+        obj["dsm_orbit_radius"] = float(max(radius, settings.orbit_fallback_radius if radius < 1e-4 else radius))
         obj["dsm_orbit_phase"] = float(phase)
     else:
-        u, v, normal = _plane_components(local, s.orbit_plane)
+        u, v, normal = _plane_components(local, settings.orbit_plane)
         radius = math.hypot(u, v)
         if radius < 1e-4:
-            radius = s.orbit_fallback_radius
+            radius = settings.orbit_fallback_radius
             angle = 0.0
         else:
             angle = math.atan2(v, u)
 
         phase = angle - scene.frame_current * speed * 0.02
-        if s.orbit_behavior == "OFFSET" and count > 1:
+        if settings.orbit_behavior == "OFFSET" and count > 1:
             phase += 2.0 * math.pi * index / count
-        elif s.orbit_behavior == "RANDOM":
+        elif settings.orbit_behavior == "RANDOM":
             phase += rng.uniform(0.0, 2.0 * math.pi)
 
         obj["dsm_orbit_radius"] = float(radius)
@@ -292,8 +283,16 @@ def apply_object(obj, context, index=0, count=1):
 
     focus = None
     if obj.type == "CAMERA":
-        focus = _create_focus(obj, context, target, bone, pivot, float(obj.get("dsm_orbit_radius", max(local.length, 1.0))))
+        focus = _create_focus(
+            obj,
+            context,
+            target,
+            bone,
+            pivot,
+            float(obj.get("dsm_orbit_radius", max(local.length, 1.0))),
+        )
 
+    obj.hide_select = False
     return True, "", focus
 
 
@@ -310,28 +309,24 @@ def update_object(obj, scene):
     local = _local_at(obj, scene.frame_current)
     world = matrix @ local
     utils.set_world_location(obj, world)
-
-    if obj.type == "CAMERA":
-        _aim_camera(obj)
-        return
-
-    if obj.get("dsm_orbit_face_direction", False):
-        next_local = _local_at(obj, float(scene.frame_current) + 0.25)
-        next_world = matrix @ next_local
-        direction = next_world - world
-        if direction.length > 1e-7:
-            try:
-                forward = obj.get("dsm_orbit_forward_axis", "Y")
-                up = "Y" if forward in {"Z", "-Z"} else "Z"
-                _set_world_rotation(obj, direction.normalized().to_track_quat(forward, up))
-            except Exception:
-                pass
+    _apply_orientation(obj, matrix, local, world, scene)
 
 
-def update_all(scene):
+def update_all(scene, updated_ids=None):
     for obj in bpy.data.objects:
-        if obj.get("dsm_orbit_enabled", False):
-            update_object(obj, scene)
+        if not obj.get("dsm_orbit_enabled", False):
+            continue
+        if updated_ids is not None:
+            dependencies = set()
+            target = _target_for(obj)
+            focus = _focus_for(obj)
+            if target:
+                dependencies.add(target.name)
+            if focus:
+                dependencies.add(focus.name)
+            if not dependencies.intersection(updated_ids):
+                continue
+        update_object(obj, scene)
 
 
 class DSM_OT_orbit_apply(Operator):
@@ -354,30 +349,31 @@ class DSM_OT_orbit_apply(Operator):
                 seen.add(obj.name)
                 objects.append(obj)
 
-        focus_empties = []
+        successes = []
         skipped = []
         for index, obj in enumerate(objects):
             ok, reason, focus = apply_object(obj, context, index, len(objects))
-            if ok and focus:
-                focus_empties.append(focus)
-            elif not ok:
+            if ok:
+                successes.append((obj, focus))
+            else:
                 skipped.append(f"{obj.name}: {reason}")
 
         update_all(context.scene)
 
-        if len(objects) == 1 and objects[0].type == "CAMERA":
+        if successes:
             try:
                 bpy.ops.object.select_all(action="DESELECT")
-                objects[0].select_set(True)
-                if focus_empties:
-                    focus_empties[0].select_set(True)
-                context.view_layer.objects.active = objects[0]
+                for obj, focus in successes:
+                    obj.select_set(True)
+                    if focus:
+                        focus.select_set(True)
+                context.view_layer.objects.active = successes[0][0]
             except Exception:
                 pass
 
         if skipped:
             self.report({"WARNING"}, "; ".join(skipped[:3]))
-        self.report({"INFO"}, f"Orbit applied to {len(objects) - len(skipped)} object(s)")
+        self.report({"INFO"}, f"Orbit applied to {len(successes)} object(s)")
         return {"FINISHED"}
 
 

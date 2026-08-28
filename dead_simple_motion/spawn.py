@@ -1,11 +1,19 @@
 import bpy
-from mathutils import Matrix, Vector
 from bpy.types import Operator
+from mathutils import Matrix, Vector
+
 from . import utils
 
 CONTROL_PREFIX = "DSM_SPAWN_CTRL_"
-FOCUS_PREFIX = "DSM_FOCUS_"
-FOCUS_CONSTRAINT = "DSM Spawn Camera Focus"
+FOCUS_PREFIX = "DSM_LOOP_FOCUS_"
+OLD_FOCUS_CONSTRAINT = "DSM Spawn Camera Focus"
+ROTATION_PATHS = {
+    "rotation_euler",
+    "rotation_quaternion",
+    "rotation_axis_angle",
+    "delta_rotation_euler",
+    "delta_rotation_quaternion",
+}
 
 
 def _resolve(obj):
@@ -13,8 +21,9 @@ def _resolve(obj):
         return None
     if obj.get("dsm_spawn_control", False):
         return bpy.data.objects.get(obj.get("dsm_spawn_child", ""))
-    if obj.get("dsm_spawn_focus_owner"):
-        return bpy.data.objects.get(obj.get("dsm_spawn_focus_owner", ""))
+    owner = utils.resolve_focus_owner(obj, "spawn")
+    if owner:
+        return owner
     if obj.get("dsm_spawn_enabled", False):
         return obj
     return None
@@ -33,7 +42,7 @@ def _control_size(obj):
         size = max(abs(float(v)) for v in obj.dimensions)
     except Exception:
         size = 1.0
-    return max(0.65, min(size * 0.55, 4.0))
+    return max(0.45, min(size * 0.4, 2.5))
 
 
 def _create_control(obj, context):
@@ -48,6 +57,7 @@ def _create_control(obj, context):
     control.empty_display_type = "PLAIN_AXES"
     control.empty_display_size = _control_size(obj)
     control.show_in_front = False
+    control.show_name = False
     control.hide_render = True
     control.hide_select = False
     control["dsm_spawn_control"] = True
@@ -58,74 +68,44 @@ def _create_control(obj, context):
 
     if old_parent:
         control.parent = old_parent
-        try:
-            control.parent_type = old_parent_type
-        except Exception:
-            pass
+        control.parent_type = old_parent_type
         if old_parent_type == "BONE":
-            try:
-                control.parent_bone = old_parent_bone
-            except Exception:
-                pass
+            control.parent_bone = old_parent_bone
 
+    # The control owns placement and orientation of the entire path.
     control.matrix_world = Matrix.Translation(location)
 
     obj.parent = control
     obj.parent_type = "OBJECT"
     obj.parent_bone = ""
     obj.matrix_parent_inverse = Matrix.Identity(4)
-    obj.matrix_basis = Matrix.LocRotScale(Vector((0, 0, 0)), rotation, scale)
+    obj.matrix_basis = Matrix.LocRotScale(Vector((0.0, 0.0, 0.0)), rotation, scale)
     obj.hide_select = False
 
     return control, old_parent, old_parent_type, old_parent_bone
 
 
 def _create_focus(camera, context, distance):
-    old = camera.constraints.get(FOCUS_CONSTRAINT)
-    if old:
-        try:
-            camera.constraints.remove(old)
-        except Exception:
-            pass
-
-    forward = camera.matrix_world.to_quaternion() @ Vector((0, 0, -1))
+    forward = camera.matrix_world.to_quaternion() @ Vector((0.0, 0.0, -1.0))
     if forward.length < 1e-5:
-        forward = Vector((0, 0, -1))
+        forward = Vector((0.0, 0.0, -1.0))
     else:
         forward.normalize()
 
-    focus = bpy.data.objects.new(f"{FOCUS_PREFIX}{camera.name}", None)
-    focus.empty_display_type = "SPHERE"
-    focus.empty_display_size = max(0.35, min(distance * 0.06, 2.0))
-    focus.show_in_front = True
-    focus.hide_render = True
-    focus["dsm_spawn_focus_owner"] = camera.name
-    collection = camera.users_collection[0] if camera.users_collection else context.collection
-    collection.objects.link(focus)
-    focus.location = camera.matrix_world.translation + forward * max(2.0, distance * 0.5)
-
-    con = camera.constraints.new("DAMPED_TRACK")
-    con.name = FOCUS_CONSTRAINT
-    con.target = focus
-    con.track_axis = "TRACK_NEGATIVE_Z"
-    camera["dsm_spawn_focus_name"] = focus.name
-    return focus
+    location = camera.matrix_world.translation + forward * max(2.0, distance * 0.5)
+    return utils.create_focus_empty(
+        context,
+        camera,
+        "spawn",
+        FOCUS_PREFIX,
+        location,
+        display_size=max(0.25, min(distance * 0.05, 1.0)),
+    )
 
 
-def _remove_focus(obj):
-    con = obj.constraints.get(FOCUS_CONSTRAINT)
-    if con:
-        try:
-            obj.constraints.remove(con)
-        except Exception:
-            pass
+def _focus_for(obj):
     name = obj.get("dsm_spawn_focus_name", "")
-    focus = bpy.data.objects.get(name) if name else None
-    if focus:
-        try:
-            bpy.data.objects.remove(focus, do_unlink=True)
-        except Exception:
-            pass
+    return bpy.data.objects.get(name) if name else None
 
 
 def _ease(progress, fade_in, fade_out):
@@ -156,6 +136,7 @@ def _capture_manual_offset(obj):
     delta = current - last
     if delta.length <= 1e-6:
         return
+
     user = utils.unpack_vector(obj.get("dsm_spawn_user_offset", (0, 0, 0)))
     user += delta
     obj["dsm_spawn_user_offset"] = utils.pack_vector(user)
@@ -166,11 +147,10 @@ def clear_object(obj, restore=True):
     if not child or not child.get("dsm_spawn_enabled", False):
         return False
 
-    seed = child.get("dsm_spawn_seed")
     control_name = child.get("dsm_spawn_control_name", "")
     control = bpy.data.objects.get(control_name) if control_name else None
-
-    _remove_focus(child)
+    utils.remove_named_constraint(child, OLD_FOCUS_CONSTRAINT)
+    utils.remove_focus_empty(child, "spawn")
 
     user_offset = utils.unpack_vector(child.get("dsm_spawn_user_offset", (0, 0, 0)))
     if restore:
@@ -189,15 +169,9 @@ def clear_object(obj, restore=True):
 
     child.parent = parent
     if parent:
-        try:
-            child.parent_type = parent_type
-        except Exception:
-            pass
+        child.parent_type = parent_type
         if parent_type == "BONE":
-            try:
-                child.parent_bone = parent_bone
-            except Exception:
-                pass
+            child.parent_bone = parent_bone
     else:
         child.parent_type = "OBJECT"
         child.parent_bone = ""
@@ -215,8 +189,6 @@ def clear_object(obj, restore=True):
             pass
 
     utils.clear_feature_props(child, "spawn")
-    if seed is not None:
-        child["dsm_spawn_seed"] = int(seed)
     return True
 
 
@@ -225,41 +197,37 @@ def apply_object(obj, context):
     if existing:
         obj = existing
 
-    seed = obj.get("dsm_spawn_seed")
+    from . import follow, orbit
 
-    from . import orbit, follow
     orbit.clear_object(obj, restore=True)
     follow.clear_object(obj, restore=True)
     clear_object(obj, restore=True)
 
-    if seed is not None:
-        obj["dsm_spawn_seed"] = int(seed)
-
     if utils.has_animation_path(obj, {"location"}):
         return False, "location already has animation or drivers", None, None
+    if obj.type == "CAMERA" and utils.has_animation_path(obj, ROTATION_PATHS):
+        return False, "camera rotation already has animation or drivers", None, None
 
-    scene = context.scene
-    s = scene.dsm_settings
-
+    settings = context.scene.dsm_settings
     original_hide_viewport = bool(obj.hide_viewport)
     original_hide_render = bool(obj.hide_render)
 
     rng = utils.seeded_rng(obj, "spawn")
-    factor = utils.variation_factor(rng, s.spawn_variation)
-    distance = max(0.001, float(s.spawn_distance))
-    phase = 0.0 if obj.type == "CAMERA" else rng.uniform(0.0, distance) * float(s.spawn_variation)
+    factor = utils.variation_factor(rng, settings.spawn_variation)
+    distance = max(0.001, float(settings.spawn_distance))
+    phase = 0.0 if obj.type == "CAMERA" else rng.uniform(0.0, distance) * float(settings.spawn_variation)
 
     control, old_parent, old_parent_type, old_parent_bone = _create_control(obj, context)
 
     obj["dsm_spawn_enabled"] = True
     obj["dsm_spawn_control_name"] = control.name
-    obj["dsm_spawn_mode"] = s.spawn_mode
-    obj["dsm_spawn_axis"] = s.spawn_axis
-    obj["dsm_spawn_speed"] = float(s.spawn_speed * factor)
+    obj["dsm_spawn_mode"] = settings.spawn_mode
+    obj["dsm_spawn_axis"] = settings.spawn_axis
+    obj["dsm_spawn_speed"] = float(settings.spawn_speed * factor)
     obj["dsm_spawn_distance"] = distance
     obj["dsm_spawn_phase_distance"] = float(phase)
-    obj["dsm_spawn_fade_in_point"] = float(s.spawn_fade_in_point)
-    obj["dsm_spawn_fade_out_point"] = float(s.spawn_fade_out_point)
+    obj["dsm_spawn_fade_in_point"] = float(settings.spawn_fade_in_point)
+    obj["dsm_spawn_fade_out_point"] = float(settings.spawn_fade_out_point)
     obj["dsm_spawn_user_offset"] = [0.0, 0.0, 0.0]
     obj["dsm_spawn_last_output"] = [0.0, 0.0, 0.0]
     obj["dsm_spawn_original_parent"] = old_parent.name if old_parent else ""
@@ -268,10 +236,7 @@ def apply_object(obj, context):
     obj["dsm_spawn_original_hide_viewport"] = original_hide_viewport
     obj["dsm_spawn_original_hide_render"] = original_hide_render
 
-    focus = None
-    if obj.type == "CAMERA":
-        focus = _create_focus(obj, context, distance)
-
+    focus = _create_focus(obj, context, distance) if obj.type == "CAMERA" else None
     return True, "", control, focus
 
 
@@ -302,7 +267,8 @@ def update_object(obj, scene):
 
     user_offset = utils.unpack_vector(obj.get("dsm_spawn_user_offset", (0, 0, 0)))
     output = user_offset + _axis(obj.get("dsm_spawn_axis", "X")) * motion
-    obj.location = output
+    if (Vector(obj.location) - output).length > 1e-7:
+        obj.location = output
     obj["dsm_spawn_last_output"] = utils.pack_vector(output)
 
     if mode == "SPAWN":
@@ -312,11 +278,27 @@ def update_object(obj, scene):
         obj.hide_viewport = bool(obj.get("dsm_spawn_original_hide_viewport", False))
         obj.hide_render = bool(obj.get("dsm_spawn_original_hide_render", False))
 
+    if obj.type == "CAMERA":
+        focus = _focus_for(obj)
+        if focus:
+            utils.aim_camera_at(obj, focus)
 
-def update_all(scene):
+
+def update_all(scene, updated_ids=None):
     for obj in bpy.data.objects:
-        if obj.get("dsm_spawn_enabled", False):
-            update_object(obj, scene)
+        if not obj.get("dsm_spawn_enabled", False):
+            continue
+        if updated_ids is not None:
+            dependencies = {obj.name}
+            control_name = obj.get("dsm_spawn_control_name", "")
+            focus_name = obj.get("dsm_spawn_focus_name", "")
+            if control_name:
+                dependencies.add(control_name)
+            if focus_name:
+                dependencies.add(focus_name)
+            if not dependencies.intersection(updated_ids):
+                continue
+        update_object(obj, scene)
 
 
 class DSM_OT_spawn_apply(Operator):
@@ -352,9 +334,11 @@ class DSM_OT_spawn_apply(Operator):
         if rigs:
             try:
                 bpy.ops.object.select_all(action="DESELECT")
-                for obj, control, _focus in rigs:
+                for obj, control, focus in rigs:
                     obj.select_set(True)
                     control.select_set(True)
+                    if focus:
+                        focus.select_set(True)
                 context.view_layer.objects.active = rigs[0][0]
             except Exception:
                 pass

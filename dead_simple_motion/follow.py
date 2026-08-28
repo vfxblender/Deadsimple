@@ -1,8 +1,14 @@
 import math
+import time
+
 import bpy
-from mathutils import Vector
 from bpy.types import Operator
+from mathutils import Vector
+
 from . import utils
+
+_RUNTIME = {}
+LOCATION_PATHS = {"location"}
 
 
 def _target(obj):
@@ -11,17 +17,10 @@ def _target(obj):
 
 
 def _target_world_position(target, bone_name=""):
-    """Return only the target point in world space.
-
-    Follow is deliberately LOCATION ONLY. For bones we use the pose bone head
-    transformed into world space and never use the bone's rotation matrix to
-    rotate the follower offset. That prevents a follower from orbiting when the
-    bone rotates in place.
-    """
     if target is None:
         return None
 
-    if target.type == 'ARMATURE' and bone_name:
+    if target.type == "ARMATURE" and bone_name:
         pose = getattr(target, "pose", None)
         if not pose:
             return None
@@ -36,6 +35,61 @@ def _target_world_position(target, bone_name=""):
     return target.matrix_world.translation.copy()
 
 
+def _organic_drift(obj, frame, amount):
+    if amount <= 0.0:
+        return Vector((0.0, 0.0, 0.0))
+
+    px = float(obj.get("dsm_follow_phase_x", 0.0))
+    py = float(obj.get("dsm_follow_phase_y", 0.0))
+    pz = float(obj.get("dsm_follow_phase_z", 0.0))
+
+    x = math.sin(frame * 0.017 + px) + 0.33 * math.sin(frame * 0.043 + py)
+    y = math.sin(frame * 0.013 + py) + 0.29 * math.sin(frame * 0.037 + pz)
+    z = math.sin(frame * 0.019 + pz) + 0.25 * math.sin(frame * 0.031 + px)
+    return Vector((x, y, z)) * (amount / 1.33)
+
+
+def _fps(scene):
+    base = float(getattr(scene.render, "fps_base", 1.0) or 1.0)
+    return max(1.0, float(scene.render.fps) / base)
+
+
+def _runtime_state(obj, scene):
+    state = _RUNTIME.get(obj.name)
+    if state is None:
+        state = {
+            "last_frame": float(scene.frame_current),
+            "last_time": time.monotonic(),
+            "current": utils.get_world_location(obj),
+        }
+        _RUNTIME[obj.name] = state
+    return state
+
+
+def _time_step(state, scene, source):
+    now = time.monotonic()
+    frame = float(scene.frame_current)
+
+    if source == "DEPSGRAPH":
+        dt = max(1.0 / 240.0, min(now - float(state.get("last_time", now)), 0.25))
+    else:
+        frame_delta = abs(frame - float(state.get("last_frame", frame)))
+        dt = frame_delta / _fps(scene)
+        if frame_delta > 12.0:
+            dt = min(dt, 0.5)
+
+    state["last_time"] = now
+    state["last_frame"] = frame
+    return max(0.0, float(dt))
+
+
+def clear_runtime(obj=None):
+    if obj is None:
+        _RUNTIME.clear()
+    else:
+        _RUNTIME.pop(obj.name, None)
+
+
 def clear_object(obj, restore=True):
     if not obj or not obj.get("dsm_follow_enabled", False):
         return False
@@ -44,14 +98,16 @@ def clear_object(obj, restore=True):
         start = utils.unpack_vector(obj.get("dsm_follow_start_world", (0, 0, 0)))
         utils.set_world_location(obj, start)
 
+    clear_runtime(obj)
     utils.clear_feature_props(obj, "follow")
+    obj.hide_select = False
     return True
 
 
 def apply_object(obj, context):
     settings = context.scene.dsm_settings
     target = settings.follow_target
-    bone = settings.follow_bone.strip() if target and target.type == 'ARMATURE' else ""
+    bone = settings.follow_bone.strip() if target and target.type == "ARMATURE" else ""
 
     if not target:
         return False, "choose a follow target"
@@ -61,17 +117,15 @@ def apply_object(obj, context):
         return False, "target or bone could not be read"
 
     from . import orbit, spawn
+
     orbit.clear_object(obj, restore=True)
     spawn.clear_object(obj, restore=True)
     clear_object(obj, restore=True)
 
-    if utils.has_animation_path(obj, {"location"}):
+    if utils.has_animation_path(obj, LOCATION_PATHS):
         return False, "location already has animation or drivers"
 
     world = utils.get_world_location(obj)
-
-    # The offset is stored in WORLD space. Bone rotation therefore never swings
-    # the follower around the bone; only movement of the bone's position matters.
     offset = world - target_position
 
     rng = utils.seeded_rng(obj, "follow")
@@ -87,30 +141,14 @@ def apply_object(obj, context):
     obj["dsm_follow_phase_x"] = rng.uniform(0.0, math.tau)
     obj["dsm_follow_phase_y"] = rng.uniform(0.0, math.tau)
     obj["dsm_follow_phase_z"] = rng.uniform(0.0, math.tau)
+    obj.hide_select = False
+
+    clear_runtime(obj)
+    _runtime_state(obj, context.scene)
     return True, ""
 
 
-def _organic_drift(obj, frame, amount):
-    """Slow non-circular positional drift.
-
-    Different mixed frequencies on each axis avoid the obvious elliptical path
-    that a simple three-axis sine setup can look like.
-    """
-    if amount <= 0.0:
-        return Vector((0.0, 0.0, 0.0))
-
-    px = float(obj.get("dsm_follow_phase_x", 0.0))
-    py = float(obj.get("dsm_follow_phase_y", 0.0))
-    pz = float(obj.get("dsm_follow_phase_z", 0.0))
-
-    x = math.sin(frame * 0.017 + px) + 0.33 * math.sin(frame * 0.043 + py)
-    y = math.sin(frame * 0.013 + py) + 0.29 * math.sin(frame * 0.037 + pz)
-    z = math.sin(frame * 0.019 + pz) + 0.25 * math.sin(frame * 0.031 + px)
-
-    return Vector((x, y, z)) * (amount / 1.33)
-
-
-def update_object(obj, scene):
+def update_object(obj, scene, source="FRAME"):
     if not obj.get("dsm_follow_enabled", False):
         return
 
@@ -128,43 +166,56 @@ def update_object(obj, scene):
     frame = float(scene.frame_current)
     desired = target_position + offset + _organic_drift(obj, frame, drift_amount)
 
-    # Delay is a trailing-response control, not a literal frame buffer. This
-    # keeps it responsive when the artist drags the target live in the viewport.
-    # 0 = immediate lock. Higher values = slower catch-up and more visible lag.
     delay = max(0.0, float(obj.get("dsm_follow_delay", 35.0)))
     if delay <= 0.0:
-        alpha = 1.0
-    else:
-        alpha = max(0.02, min(1.0, 1.0 / (1.0 + delay * 0.14)))
+        utils.set_world_location(obj, desired)
+        state = _runtime_state(obj, scene)
+        state["current"] = desired.copy()
+        state["last_frame"] = frame
+        state["last_time"] = time.monotonic()
+        return
 
+    state = _runtime_state(obj, scene)
+    dt = _time_step(state, scene, source)
+    if dt <= 0.0:
+        return
+
+    # Time-based exponential smoothing: the result depends on elapsed time,
+    # not on how many depsgraph callbacks Blender happened to emit.
+    tau = 0.04 + delay * 0.018
+    alpha = 1.0 - math.exp(-dt / max(tau, 1e-5))
     current = utils.get_world_location(obj)
-    new_location = current.lerp(desired, alpha)
+    new_location = current.lerp(desired, max(0.0, min(1.0, alpha)))
 
-    if (current - new_location).length > 1e-6:
-        utils.set_world_location(obj, new_location)
+    if utils.set_world_location(obj, new_location):
+        state["current"] = new_location.copy()
 
 
-def update_all(scene):
+def update_all(scene, source="FRAME", updated_ids=None):
     for obj in bpy.data.objects:
-        if obj.get("dsm_follow_enabled", False):
-            update_object(obj, scene)
+        if not obj.get("dsm_follow_enabled", False):
+            continue
+        if updated_ids is not None:
+            target = _target(obj)
+            if not target or target.name not in updated_ids:
+                continue
+        update_object(obj, scene, source=source)
 
 
 class DSM_OT_follow_apply(Operator):
     bl_idname = "dsm.follow_apply"
     bl_label = "Apply Follow"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         target = context.scene.dsm_settings.follow_target
         objects = utils.selected_objects(context, target)
         if not objects:
-            self.report({'WARNING'}, "Select one or more followers")
-            return {'CANCELLED'}
+            self.report({"WARNING"}, "Select one or more followers")
+            return {"CANCELLED"}
 
         success = 0
         skipped = []
-
         for obj in objects:
             ok, reason = apply_object(obj, context)
             if ok:
@@ -172,23 +223,23 @@ class DSM_OT_follow_apply(Operator):
             else:
                 skipped.append(f"{obj.name}: {reason}")
 
-        update_all(context.scene)
+        update_all(context.scene, source="FRAME")
 
         if skipped:
-            self.report({'WARNING'}, "; ".join(skipped[:3]))
-        self.report({'INFO'}, f"Follow applied to {success} object(s)")
-        return {'FINISHED'}
+            self.report({"WARNING"}, "; ".join(skipped[:3]))
+        self.report({"INFO"}, f"Follow applied to {success} object(s)")
+        return {"FINISHED"}
 
 
 class DSM_OT_follow_clear(Operator):
     bl_idname = "dsm.follow_clear"
     bl_label = "Clear Follow"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         count = sum(1 for obj in utils.selected_objects(context) if clear_object(obj))
-        self.report({'INFO'}, f"Follow cleared on {count} object(s)")
-        return {'FINISHED'}
+        self.report({"INFO"}, f"Follow cleared on {count} object(s)")
+        return {"FINISHED"}
 
 
 _CLASSES = (DSM_OT_follow_apply, DSM_OT_follow_clear)
@@ -200,5 +251,6 @@ def register():
 
 
 def unregister():
+    clear_runtime()
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)

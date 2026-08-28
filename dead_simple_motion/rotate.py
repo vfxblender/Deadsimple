@@ -1,10 +1,18 @@
 import bpy
 from bpy.types import Operator
 from mathutils import Matrix, Vector
+
 from . import utils
 
 DRIVER_MARKER = "dsm_rotate_marker"
 CONTROL_PREFIX = "DSM_ROT_CTRL_"
+ROTATION_PATHS = {
+    "rotation_euler",
+    "rotation_quaternion",
+    "rotation_axis_angle",
+    "delta_rotation_euler",
+    "delta_rotation_quaternion",
+}
 
 
 def _axis_index(axis):
@@ -33,19 +41,19 @@ def _selected_children(context):
 
 
 def _range(scene):
-    s = scene.dsm_settings
-    start = int(s.rotate_start) if s.rotate_use_start else int(scene.frame_start)
-    end = int(s.rotate_end) if s.rotate_use_end else int(scene.frame_end)
+    settings = scene.dsm_settings
+    start = int(settings.rotate_start) if settings.rotate_use_start else int(scene.frame_start)
+    end = int(settings.rotate_end) if settings.rotate_use_end else int(scene.frame_end)
     if end <= start:
         end = start + 1
     return start, end
 
 
 def _expression(scene, speed):
-    s = scene.dsm_settings
-    start = int(s.rotate_start) if s.rotate_use_start else int(scene.frame_start)
-    if s.rotate_use_end:
-        end = max(start, int(s.rotate_end))
+    settings = scene.dsm_settings
+    start = int(settings.rotate_start) if settings.rotate_use_start else int(scene.frame_start)
+    if settings.rotate_use_end:
+        end = max(start, int(settings.rotate_end))
         elapsed = f"max(min(frame,{end})-{start},0)"
     else:
         elapsed = f"max(frame-{start},0)"
@@ -57,7 +65,7 @@ def _control_size(obj):
         size = max(abs(float(v)) for v in obj.dimensions)
     except Exception:
         size = 1.0
-    return max(0.65, min(size * 0.55, 4.0))
+    return max(0.45, min(size * 0.4, 2.5))
 
 
 def _create_control(obj, context):
@@ -72,6 +80,7 @@ def _create_control(obj, context):
     control.empty_display_type = "PLAIN_AXES"
     control.empty_display_size = _control_size(obj)
     control.show_in_front = False
+    control.show_name = False
     control.hide_render = True
     control.hide_select = False
     control["dsm_rotate_control"] = True
@@ -82,15 +91,9 @@ def _create_control(obj, context):
 
     if old_parent:
         control.parent = old_parent
-        try:
-            control.parent_type = old_parent_type
-        except Exception:
-            pass
+        control.parent_type = old_parent_type
         if old_parent_type == "BONE":
-            try:
-                control.parent_bone = old_parent_bone
-            except Exception:
-                pass
+            control.parent_bone = old_parent_bone
 
     control.matrix_world = Matrix.LocRotScale(location, rotation, Vector((1.0, 1.0, 1.0)))
 
@@ -104,7 +107,7 @@ def _create_control(obj, context):
     obj.scale = scale
     obj.hide_select = False
 
-    return control, old_parent, old_parent_type, old_parent_bone
+    return control
 
 
 def _remove_driver(obj):
@@ -121,58 +124,41 @@ def _remove_driver(obj):
 def _add_driver(obj, scene):
     axis = _axis_index(obj.get("dsm_rotate_axis", "Z"))
     speed = float(obj.get("dsm_rotate_speed", scene.dsm_settings.rotate_speed))
-    expression = _expression(scene, speed)
-    fc = utils.add_owned_driver(obj, "rotation_euler", axis, expression, DRIVER_MARKER)
-    return fc is not None
+    return utils.add_owned_driver(
+        obj,
+        "rotation_euler",
+        axis,
+        _expression(scene, speed),
+        DRIVER_MARKER,
+    ) is not None
 
 
 def _remove_bake_keys(obj):
     if not obj.get("dsm_rotate_baked", False):
         return
+
     axis = _axis_index(obj.get("dsm_rotate_axis", "Z"))
-    for frame in list(obj.get("dsm_rotate_bake_frames", [])):
-        try:
-            obj.keyframe_delete(data_path="rotation_euler", index=axis, frame=float(frame))
-        except Exception:
-            pass
-    obj["dsm_rotate_baked"] = False
-    if "dsm_rotate_bake_frames" in obj:
-        try:
-            del obj["dsm_rotate_bake_frames"]
-        except Exception:
-            pass
+    records = (
+        (obj.get("dsm_rotate_bake_start_frame"), obj.get("dsm_rotate_bake_start_value")),
+        (obj.get("dsm_rotate_bake_end_frame"), obj.get("dsm_rotate_bake_end_value")),
+    )
+    for frame, value in records:
+        if frame is None or value is None:
+            continue
+        utils.remove_matching_keyframe(obj, "rotation_euler", axis, float(frame), float(value))
 
-
-def _set_bake_linear(obj):
-    ad = getattr(obj, "animation_data", None)
-    action = getattr(ad, "action", None) if ad else None
-    if not action:
-        return
-    axis = _axis_index(obj.get("dsm_rotate_axis", "Z"))
-
-    fcurves = getattr(action, "fcurves", None)
-    if fcurves is not None:
-        try:
-            fc = fcurves.find("rotation_euler", index=axis)
-            if fc:
-                for key in fc.keyframe_points:
-                    key.interpolation = "LINEAR"
-                fc.extrapolation = "CONSTANT"
-                return
-        except Exception:
-            pass
-
-    try:
-        from bpy_extras.anim_utils import animdata_get_channelbag_for_assigned_slot
-        bag = animdata_get_channelbag_for_assigned_slot(ad)
-        if bag:
-            fc = bag.fcurves.find("rotation_euler", index=axis)
-            if fc:
-                for key in fc.keyframe_points:
-                    key.interpolation = "LINEAR"
-                fc.extrapolation = "CONSTANT"
-    except Exception:
-        pass
+    for key in (
+        "dsm_rotate_baked",
+        "dsm_rotate_bake_start_frame",
+        "dsm_rotate_bake_start_value",
+        "dsm_rotate_bake_end_frame",
+        "dsm_rotate_bake_end_value",
+    ):
+        if key in obj:
+            try:
+                del obj[key]
+            except Exception:
+                pass
 
 
 def _bake(obj, scene):
@@ -183,7 +169,8 @@ def _bake(obj, scene):
     start, end = _range(scene)
     axis = _axis_index(child.get("dsm_rotate_axis", "Z"))
     speed = float(child.get("dsm_rotate_speed", scene.dsm_settings.rotate_speed))
-    angle = (end - start) * speed * 0.02
+    start_value = 0.0
+    end_value = (end - start) * speed * 0.02
 
     _remove_bake_keys(child)
     _remove_driver(child)
@@ -191,16 +178,35 @@ def _bake(obj, scene):
     current = int(scene.frame_current)
     try:
         child.rotation_mode = "XYZ"
-        child.rotation_euler[axis] = 0.0
-        child.keyframe_insert(data_path="rotation_euler", index=axis, frame=float(start), group="Dead Simple Rotate")
-        child.rotation_euler[axis] = angle
-        child.keyframe_insert(data_path="rotation_euler", index=axis, frame=float(end), group="Dead Simple Rotate")
+        child.rotation_euler[axis] = start_value
+        child.keyframe_insert(
+            data_path="rotation_euler",
+            index=axis,
+            frame=float(start),
+            group="Dead Simple Rotate",
+        )
+        child.rotation_euler[axis] = end_value
+        child.keyframe_insert(
+            data_path="rotation_euler",
+            index=axis,
+            frame=float(end),
+            group="Dead Simple Rotate",
+        )
     except Exception:
+        _add_driver(child, scene)
         return False
 
-    _set_bake_linear(child)
+    utils.set_matching_keyframes_linear(
+        child,
+        "rotation_euler",
+        axis,
+        ((float(start), float(start_value)), (float(end), float(end_value))),
+    )
     child["dsm_rotate_baked"] = True
-    child["dsm_rotate_bake_frames"] = [float(start), float(end)]
+    child["dsm_rotate_bake_start_frame"] = float(start)
+    child["dsm_rotate_bake_start_value"] = float(start_value)
+    child["dsm_rotate_bake_end_frame"] = float(end)
+    child["dsm_rotate_bake_end_value"] = float(end_value)
 
     try:
         scene.frame_set(current)
@@ -245,22 +251,21 @@ def clear_object(obj, restore=True):
     if not child or not child.get("dsm_rotate_enabled", False):
         return False
 
-    seed = child.get("dsm_rotate_seed")
     control_name = child.get("dsm_rotate_control_name", "")
     control = bpy.data.objects.get(control_name) if control_name else None
 
     _remove_bake_keys(child)
     _remove_driver(child)
 
-    try:
-        child.rotation_mode = "XYZ"
-        child.rotation_euler = (0.0, 0.0, 0.0)
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
+    if restore:
+        try:
+            child.rotation_mode = "XYZ"
+            child.rotation_euler = (0.0, 0.0, 0.0)
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
 
     world = child.matrix_world.copy()
-
     parent_name = child.get("dsm_rotate_original_parent", "")
     parent = bpy.data.objects.get(parent_name) if parent_name else None
     parent_type = child.get("dsm_rotate_original_parent_type", "OBJECT")
@@ -269,15 +274,9 @@ def clear_object(obj, restore=True):
 
     child.parent = parent
     if parent:
-        try:
-            child.parent_type = parent_type
-        except Exception:
-            pass
+        child.parent_type = parent_type
         if parent_type == "BONE":
-            try:
-                child.parent_bone = parent_bone
-            except Exception:
-                pass
+            child.parent_bone = parent_bone
     else:
         child.parent_type = "OBJECT"
         child.parent_bone = ""
@@ -298,8 +297,6 @@ def clear_object(obj, restore=True):
             pass
 
     utils.clear_feature_props(child, "rotate")
-    if seed is not None:
-        child["dsm_rotate_seed"] = int(seed)
     return True
 
 
@@ -308,14 +305,11 @@ def apply_object(obj, context):
     if existing:
         obj = existing
 
-    seed = obj.get("dsm_rotate_seed")
     if obj.get("dsm_rotate_enabled", False):
         clear_object(obj, restore=True)
-        if seed is not None:
-            obj["dsm_rotate_seed"] = int(seed)
 
-    if utils.has_animation_path(obj, {"rotation_euler", "rotation_quaternion", "rotation_axis_angle", "delta_rotation_euler", "delta_rotation_quaternion"}):
-        return False, "object already has rotation animation/drivers", None
+    if utils.has_animation_path(obj, ROTATION_PATHS):
+        return False, "object already has rotation animation or drivers", None
 
     scene = context.scene
     settings = scene.dsm_settings
@@ -330,7 +324,7 @@ def apply_object(obj, context):
     speed_factor = utils.variation_factor(rng, settings.rotate_variation)
     speed = float(settings.rotate_speed * speed_factor)
 
-    control, _, _, _ = _create_control(obj, context)
+    control = _create_control(obj, context)
 
     obj["dsm_rotate_enabled"] = True
     obj["dsm_rotate_control_name"] = control.name
@@ -341,11 +335,10 @@ def apply_object(obj, context):
     obj["dsm_rotate_original_parent_type"] = old_parent_type
     obj["dsm_rotate_original_parent_bone"] = old_parent_bone
     obj["dsm_rotate_original_rotation_mode"] = old_rotation_mode
-    obj["dsm_rotate_baked"] = False
 
     if not _add_driver(obj, scene):
         clear_object(obj, restore=True)
-        return False, "could not create rotation driver", None
+        return False, "could not create DSM rotation driver", None
 
     try:
         context.view_layer.update()
@@ -403,6 +396,7 @@ class DSM_OT_rotate_apply(Operator):
 class DSM_OT_rotate_bake(Operator):
     bl_idname = "dsm.rotate_bake"
     bl_label = "Bake Rotation"
+    bl_description = "Convert the DSM rotation driver to two DSM-owned linear keyframes"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -439,11 +433,11 @@ class DSM_OT_rotate_key_in(Operator):
     bl_options = {"UNDO"}
 
     def execute(self, context):
-        s = context.scene.dsm_settings
-        s.rotate_use_start = True
-        s.rotate_start = context.scene.frame_current
+        settings = context.scene.dsm_settings
+        settings.rotate_use_start = True
+        settings.rotate_start = context.scene.frame_current
         count = _refresh_selected(context)
-        self.report({"INFO"}, f"Key In {s.rotate_start} updated on {count} rig(s)")
+        self.report({"INFO"}, f"Key In {settings.rotate_start} updated on {count} rig(s)")
         return {"FINISHED"}
 
 
@@ -453,11 +447,11 @@ class DSM_OT_rotate_key_out(Operator):
     bl_options = {"UNDO"}
 
     def execute(self, context):
-        s = context.scene.dsm_settings
-        s.rotate_use_end = True
-        s.rotate_end = context.scene.frame_current
+        settings = context.scene.dsm_settings
+        settings.rotate_use_end = True
+        settings.rotate_end = context.scene.frame_current
         count = _refresh_selected(context)
-        self.report({"INFO"}, f"Key Out {s.rotate_end} updated on {count} rig(s)")
+        self.report({"INFO"}, f"Key Out {settings.rotate_end} updated on {count} rig(s)")
         return {"FINISHED"}
 
 
@@ -467,15 +461,22 @@ class DSM_OT_rotate_clear_range(Operator):
     bl_options = {"UNDO"}
 
     def execute(self, context):
-        s = context.scene.dsm_settings
-        s.rotate_use_start = False
-        s.rotate_use_end = False
+        settings = context.scene.dsm_settings
+        settings.rotate_use_start = False
+        settings.rotate_use_end = False
         count = _refresh_selected(context)
         self.report({"INFO"}, f"Rotate range cleared on {count} rig(s)")
         return {"FINISHED"}
 
 
-_CLASSES = (DSM_OT_rotate_apply, DSM_OT_rotate_bake, DSM_OT_rotate_clear, DSM_OT_rotate_key_in, DSM_OT_rotate_key_out, DSM_OT_rotate_clear_range)
+_CLASSES = (
+    DSM_OT_rotate_apply,
+    DSM_OT_rotate_bake,
+    DSM_OT_rotate_clear,
+    DSM_OT_rotate_key_in,
+    DSM_OT_rotate_key_out,
+    DSM_OT_rotate_clear_range,
+)
 
 
 def register():
